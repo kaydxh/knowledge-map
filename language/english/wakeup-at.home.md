@@ -1,5 +1,6 @@
 ## Wake up at home
 I wake up in the mornining.
+Wow! It's eight o'clock.
 I look at the time on my phone.
 It's time to get up.
 I yawn.
