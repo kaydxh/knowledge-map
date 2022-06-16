@@ -8,3 +8,14 @@ How many cookies could a good cook cook if a good cook could cook cookies? 如�
 Justice has long arms. 公道有一条长胳膊/法网恢恢疏而不漏
 He who laughs last laughs best. 笑到最后的人笑得最好
 Never trouble troubles unitl troubles trouble you. 麻烦不找你，别去找麻烦。
+Learn to crawl before you can walk. 学走之前先学爬
+The more you learn, the more you earn. 你学的越多，你得到的回报就越多。
+A little pot is soon hot. 壶小易热，量小易怒。
+All is well that ends well. 结局好，全都好。
+If you scratch my back, I'll scratch yours. 如果你抓我的背，我也会抓你的。
+
+
+## Daily
+Everything is getting better and better. 一切正变得越来越好。
+Let's get together when the weather gets better. 天气好的时候让我们聚一聚。
+Grab every chance to practice your English. 抓住每一次机会去练习你的英语。
