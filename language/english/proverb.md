@@ -13,6 +13,9 @@ The more you learn, the more you earn. 你学的越多，你得到的回报就�
 A little pot is soon hot. 壶小易热，量小易怒。
 All is well that ends well. 结局好，全都好。
 If you scratch my back, I'll scratch yours. 如果你抓我的背，我也会抓你的。
+The early bird catches the worm. 早起的鸟儿有虫吃。
+Birds of a feather flock together. 物以类聚，人以群分。
+Lost days will nerver come again. 光阴一去不复返。
 
 
 ## Daily
