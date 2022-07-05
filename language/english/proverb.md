@@ -16,6 +16,8 @@ If you scratch my back, I'll scratch yours. 如果你抓我的背，我也会抓
 The early bird catches the worm. 早起的鸟儿有虫吃。
 Birds of a feather flock together. 物以类聚，人以群分。
 Lost days will nerver come again. 光阴一去不复返。
+All roads lead to Rome. 条条大路通罗马。
+Out of sight, out of mind. 眼不见，心不烦。
 
 
 ## Daily
