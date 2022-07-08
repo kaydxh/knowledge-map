@@ -18,6 +18,10 @@ Birds of a feather flock together. 物以类聚，人以群分。
 Lost days will nerver come again. 光阴一去不复返。
 All roads lead to Rome. 条条大路通罗马。
 Out of sight, out of mind. 眼不见，心不烦。
+Many hands make light work. 众人拾柴火焰高.(很多双手造就了轻松的工作）
+Experience is the best teacher. 经验是最好的老师。
+Where there is a will, there is a way. 有事者事竟成。
+What can't be cured must be endured. 无法改变就要适应。
 
 
 ## Daily
