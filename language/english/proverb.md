@@ -22,6 +22,9 @@ Many hands make light work. 众人拾柴火焰高.(很多双手造就了轻松�
 Experience is the best teacher. 经验是最好的老师。
 Where there is a will, there is a way. 有事者事竟成。
 What can't be cured must be endured. 无法改变就要适应。
+The limits of your language are the limits of your world. 语言观决定世界观。（你的语言的界限，就是你的世界的界限)
+God helps those who help themselves. 天助自助者
+A bird in the hand is worth two in the brush. 一鸟在手胜过两鸟在林。
 
 
 ## Daily
