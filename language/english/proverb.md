@@ -26,6 +26,16 @@ The limits of your language are the limits of your world. 语言观决定世界�
 God helps those who help themselves. 天助自助者
 A bird in the hand is worth two in the brush. 一鸟在手胜过两鸟在林。
 
+### listen11
+Time and tide wait for no man. 岁月不待人。
+Every dog has his day. 人人兼有得意时。
+
+An old dog cannot learn new tricks. 老狗学不了新把戏。
+A fox may grow gray, but nerver good. 江山易改本性难移。
+
+Forbidden fruit is sweet. 禁果最甜。
+Everything is good when new, but friends when old. 凡事都是新的好，朋友却是老的好。
+
 
 ## Daily
 Everything is getting better and better. 一切正变得越来越好。
