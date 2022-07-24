@@ -36,6 +36,9 @@ A fox may grow gray, but nerver good. 江山易改本性难移。
 Forbidden fruit is sweet. 禁果最甜。
 Everything is good when new, but friends when old. 凡事都是新的好，朋友却是老的好。
 
+Business is business. 公事公办。
+Every cloud has a silver lining. 黑暗中总有一线光明。
+
 
 ## Daily
 Everything is getting better and better. 一切正变得越来越好。
