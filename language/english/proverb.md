@@ -39,6 +39,8 @@ Everything is good when new, but friends when old. 凡事都是新的好，朋�
 Business is business. 公事公办。
 Every cloud has a silver lining. 黑暗中总有一线光明。
 
+Laziness is the mother of poverty. 懒惰是贫穷之母。
+
 
 ## Daily
 Everything is getting better and better. 一切正变得越来越好。
