@@ -44,6 +44,9 @@ Laziness is the mother of poverty. 懒惰是贫穷之母。
 The shoemaker always wears the worst shoes. 鞋匠总是穿最破的鞋。
 There is no pleasure without pain. 没有苦就没有乐。
 
+Hit the nail on the head. 一针见血。
+When in Rome, do as the Romans do. 入乡随俗.
+
 
 ## Daily
 Everything is getting better and better. 一切正变得越来越好。
