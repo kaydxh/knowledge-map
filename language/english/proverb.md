@@ -45,7 +45,12 @@ The shoemaker always wears the worst shoes. 鞋匠总是穿最破的鞋。
 There is no pleasure without pain. 没有苦就没有乐。
 
 Hit the nail on the head. 一针见血。
-When in Rome, do as the Romans do. 入乡随俗.
+When in Rome, do as the Romans do. 入乡随俗。
+
+Business is business. 生意归生意(公事公办)。
+Great minds think alike. 英雄所见略同。
+Change your attitude, change your life. 改变你的态度，改变你的生活。
+Every advantage has its disadvantage. 每个优势都有不足之处。
 
 
 ## Daily
