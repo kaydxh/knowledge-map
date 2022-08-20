@@ -53,6 +53,7 @@ Change your attitude, change your life. 改变你的态度，改变你的生活�
 Every advantage has its disadvantage. 每个优势都有不足之处。
 
 
+
 ## Daily
 Everything is getting better and better. 一切正变得越来越好。
 Let's get together when the weather gets better. 天气好的时候让我们聚一聚。
