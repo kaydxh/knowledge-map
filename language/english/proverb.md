@@ -52,6 +52,9 @@ Great minds think alike. 英雄所见略同。
 Change your attitude, change your life. 改变你的态度，改变你的生活。
 Every advantage has its disadvantage. 每个优势都有不足之处。
 
+Many hands make light work. 众人拾柴火焰高。
+No pain, no gain. 不劳无获。
+Nothing brave, nothing have. 不入虎穴焉得虎子。
 
 
 ## Daily
