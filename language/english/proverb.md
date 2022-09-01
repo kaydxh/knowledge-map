@@ -56,6 +56,9 @@ Many hands make light work. 众人拾柴火焰高。
 No pain, no gain. 不劳无获。
 Nothing brave, nothing have. 不入虎穴焉得虎子。
 
+Learning makes a good man better and ill man worse. 学习让好人更好，坏人更坏。
+It is no use crying over split milk. 打翻的牛奶，哭也没用。/覆水难收。
+
 
 ## Daily
 Everything is getting better and better. 一切正变得越来越好。
