@@ -2,6 +2,7 @@
 Now let's take a look at the language points in this lesson.
 This is also the first sentence pattern we're learning today: What are you thinking today?
 The second sentence pattern we're learning today is: Did you ...?
+
 So much for today's language points.
 I hope you can review in time and make progress day by day.
 
