@@ -10,3 +10,9 @@ Ok. I need to walk along the street and turn left at the traffic light. The hotp
 I've arrived. Here is the Wal-Mart, but where is the hotpot restaurant?
 There's only a spa. It must have been the other location after all
 Oh well, I'm here now!
+
+
+//
+used to do sth. 过去常常做某事
+be used to sth./doing sth. 习惯某事
+be used to do sth. 被用来做某事
