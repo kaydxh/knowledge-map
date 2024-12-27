@@ -20,7 +20,21 @@
 19. Running in circles 兜圈子
 20. Having a brain fog 思维模糊
 
-## 2 外面天气怎么样？
+## 2 关于旅行的表达
+1. souvenir 纪念品
+2. passport 护照
+3. money exchange 货币兑换
+4. catch a flight 赶飞机
+5. ticket reservation 预定机票
+6. Check-in Counter 值机柜台
+7. shuttle bus 接驳巴士
+8. claim your luggage 认领行李
+9. Did you bring any souvenirs back on your trip?你这次旅行有没有带回来一些纪念品？
+10. Your flight will take off in 1 hour. 您乘坐的航班将在1小时后起飞。
+11. Please check in as soon as possible.请尽快办理登机。
+12. Do I have to buy insurance when I buy an airline ticket?我买机票一定要买保险吗？
+
+## 3 外面天气怎么样？
 1. 如果外面感觉有点凉怎么说？ It's a bit chilly today. 
 2. 外面好冷好冷…… It was freezing cold day for the parade. 
 3. 外面有点闷热 It's muggy outside.
