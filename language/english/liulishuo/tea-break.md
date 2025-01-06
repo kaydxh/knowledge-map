@@ -46,3 +46,15 @@
 9. 有雾的 We couldn't see the bridge because it was too foggy.
 10. 潮湿的 It's humid, I feel a lot hotter than it actually is.
 11. 外面阳光明媚，五彩缤纷的花朵和翠绿的柳树。祝你整天都快乐 It's sunny outside，colorful folwers and green willows . Wish you happy all the day.
+
+## 4 祝愿父母家人朋友身体健康
+1. Wishing you a long life.
+    祝您长命百岁。
+2. Wishing a happy, long and healthy life!
+    多福多寿！
+3. Wishing friends happy, health and happiness.
+    祝福朋友快快乐乐，健康幸福。
+4. Good luck and great success in the coming New Year.
+     祝愿健康、幸运，新年快乐！
+
+
