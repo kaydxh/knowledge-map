@@ -54,7 +54,31 @@
     多福多寿！
 3. Wishing friends happy, health and happiness.
     祝福朋友快快乐乐，健康幸福。
-4. Good luck and great success in the coming New Year.
+Good luck and great success in the coming New Year.
      祝愿健康、幸运，新年快乐！
 
-
+## 5 wechat
+1. WeChat 微信
+2. Could I have your WeChat?我能加你微信吗？
+3. Add 添加好友
+4. number 手机号
+5. scan QR code 扫二维码
+6. friend request 好友申请
+7. Alias 备注名
+8. Send a sticker 发一个表情
+9. chat history 聊天记录
+10. You were mentioned 有人@我
+11. moments 朋友圈
+12. status 状态
+13. update 更新
+14. post something on Moments 发朋友圈
+15. share someone's moments/ share something on Moments 转发朋友圈
+16. block somebody 拉黑
+17. shield sb. 屏蔽
+18. official accounts 公众号
+19. public accounts。
+20. subscriptions也是官方翻译，是订阅号的意思。
+21. 关注: follow
+22. 取关: unfollow
+23. 点赞: give ... a like / thumb-up
+24. 评论: Comment
