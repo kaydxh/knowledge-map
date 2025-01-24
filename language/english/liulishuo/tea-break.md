@@ -82,3 +82,40 @@ Good luck and great success in the coming New Year.
 22. 取关: unfollow
 23. 点赞: give ... a like / thumb-up
 24. 评论: Comment
+
+## 6 小吃
+1. 螺蛳粉 Snail Rice-flour Noodles
+2. 桂林米粉 Guilin Rice Noodles
+3. 酸辣粉 Hot and Sour Rice Noodles
+4. 鸭血粉丝汤 Duck Blood Soup with Vermicelli
+5. 凉皮 Cold Rice Noodles
+6. 红油抄手 Wonton Soup in Hot and Spicy Sauce
+7. 麻辣烫 Malatang
+8. 羊肉泡馍 Pita Bread Soaked in Lamb Soup
+9. 豆腐脑 Tofu Pudding
+10. 烤冷面 Grilled Cold Noodles
+11. 沙县小吃 Shaxian Snacks
+
+12. 麻辣小龙虾 Spicy Crayfish
+13. 正宗街边烤串 Proper Street Kebabs
+14. 羊肉串 Lamb Kebabs with Cumin
+15. 铁板鱿鱼 Teppanyaki Squid
+16. 臭豆腐 Stinky Tofu
+
+17. 哈尔滨红肠 Harbin Red Sausage
+18. 生煎包 Pan-Fried Baozi Stuffed with Pork
+19. 豆沙包 Baozi Stuffed with Red Bean Paste
+20. 奶黄包 Baozi Stuffed with Creamy Custard
+21. 叉烧包 Baozi Stuffed with BBQ Pork
+22. 小笼汤包 Baozi Stuffed with Juicy Pork
+23. 川北凉粉 Tossed Clear Noodles in Chili Sauce
+24. 夫妻肺片 Couple's Sliced Beef in Chili Sauce
+
+25. 桂花糯米藕 Steamed Lotus Root Stuffed with Glutinous Rice
+26. 酸辣蕨根粉 Hot and Sour Fern Root Noodles
+27. 大拉皮 Tossed Mung Clear Noodles in Sauce
+28. 酱牛肉 Beef in Brown Sauce
+29. 口水鸡 Steamed Chicken with Chili Sauce
+30. 白切鸡 Sliced Boiled Chicken
+31. 糖蒜 Pickled Sweet Garlic
+32. 蜜汁叉烧 Honey-Stewed BBQ Pork
