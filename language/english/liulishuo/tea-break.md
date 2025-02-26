@@ -119,3 +119,22 @@ Good luck and great success in the coming New Year.
 30. 白切鸡 Sliced Boiled Chicken
 31. 糖蒜 Pickled Sweet Garlic
 32. 蜜汁叉烧 Honey-Stewed BBQ Pork
+
+## 7 赞美朋友
+1. You're a great listener.
+   你是个很好的倾听者。
+2. You inspire me.
+   你激励了我/你是我的榜样。
+3. You are an amazing friend./You are such a good friend.
+   有你这样的朋友真好。
+4. I love talking with you.
+   我喜欢跟你聊天。
+5. You have a good sense of humor.
+   你真幽默。【美国人极其喜欢的表扬！】
+6. You're really talented.
+   你很有天赋。
+7. You're so smart.
+   你非常聪明。
+8. You've got a great personality.
+   你的个性很好。
+
