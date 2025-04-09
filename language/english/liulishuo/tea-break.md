@@ -138,3 +138,8 @@ Good luck and great success in the coming New Year.
 8. You've got a great personality.
    你的个性很好。
 
+## 8 俚语
+1. a piece of cake
+  小菜一碟；易如反掌
+2. salad days
+  无忧无虑的日子
