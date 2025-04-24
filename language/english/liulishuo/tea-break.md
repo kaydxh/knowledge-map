@@ -143,3 +143,17 @@ Good luck and great success in the coming New Year.
   小菜一碟；易如反掌
 2. salad days
   无忧无虑的日子
+
+// apple 相关的俚语
+3. An apple a day keeps the doctor away.  一天一个苹果，疾病远离我
+4. the apple of one's eye  掌上明珠，心爱之人或物
+5. She is the apple of our eye.  她是全家人的掌上明珠
+6. Children are the apple of their parents' eyes. 孩子是父母的掌上明珠
+7. "You Are the Apple of My Eye"    《那些年，我们一起追的女孩》
+8. Big Apple (New York)  大苹果城，即纽约市
+9. I live in the Big Apple.  我住在纽约
+
+// cherry 相关的俚语
+10. a bowl of cherries: to be wonderful  精彩的，绝妙的 
+11. Life isn't always a bowl of cherries.  生活并不总是美好的。
+
