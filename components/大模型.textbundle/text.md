@@ -416,6 +416,64 @@
 	- 稀疏：选择性保留重要token
 	- 共享：GQA、MQA
 
+### Flash Attention
+
+- 核心思想：通过重新设计注意力计算顺序，减少HBM（显存）访问，利用SRAM（片上缓存）加速
+
+- 传统Attention的问题
+	- 显存访问瓶颈
+		- 计算流程：Q×K^T → Softmax → ×V
+		- 中间结果（N×N的注意力矩阵）需要写回HBM
+		- HBM带宽慢（约1.5TB/s），成为性能瓶颈
+	- 示例：序列长度1024，中间矩阵1024×1024需要4MB显存
+	- 访存密集型：大量时间花在数据搬运上，而非计算
+
+- Flash Attention优化策略
+
+	- Tiling（分块计算）
+		- 将Q、K、V矩阵分块（如64×64的tile）
+		- 每次只加载一小块到SRAM中计算
+		- 逐块计算Attention，无需完整的N×N矩阵
+		- 减少HBM访问次数：O(N²) → O(N²/M)，M为SRAM大小
+
+	- Recomputation（重计算）
+		- 前向传播：不保存完整的注意力矩阵
+		- 反向传播：需要时重新计算注意力分数
+		- 用计算换存储：反向时重算比保存中间结果更快
+
+	- Kernel Fusion（算子融合）
+		- 将Softmax、Dropout、Masking融合到单个CUDA kernel
+		- 避免多次读写HBM
+		- 在SRAM中完成所有操作后再写回结果
+
+- 计算流程示意
+	- 外层循环：遍历Q的分块
+	- 内层循环：遍历K、V的分块
+	- 每次迭代：
+		- 从HBM加载Q[i]、K[j]、V[j]到SRAM
+		- 在SRAM中计算Q[i]K[j]^T
+		- 在SRAM中计算Softmax
+		- 在SRAM中计算Attention×V[j]
+		- 累积结果，更新统计量（max、sum）
+		- 写回最终结果到HBM
+
+- 性能提升
+	- 训练速度：提升2-4倍
+	- 显存占用：降低10-20倍（不存储N×N矩阵）
+	- 支持更长序列：可处理16k-64k长度序列
+
+- Flash Attention 2改进
+	- 更细粒度的并行：从thread block级别到warp级别
+	- 减少非矩阵乘法操作（non-matmul FLOPs）
+	- 优化工作分区：减少线程间同步开销
+	- 性能再提升：相比Flash Attention 1快2倍
+
+- 应用场景
+	- 长序列建模：文档理解、长对话
+	- 多模态：处理高分辨率图像的ViT
+	- 训练加速：节省显存，增大batch size
+	- 推理优化：结合KV Cache使用
+
 ### PagedAttention（vLLM）
 
 - 核心思想：借鉴OS虚拟内存分页机制管理KV Cache
