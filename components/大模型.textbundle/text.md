@@ -2,7 +2,7 @@
 
 ## 一、Transformer架构
 
-### 核心结构
+### 1.1 核心结构
 
 - 由Multi-Head Self-Attention和FFN（Feed-Forward Network）前馈网络组成
 
@@ -20,7 +20,7 @@
 	-  
 ![image](assets/88411e8c6689ae89bc2af2b5875c599faba2a4e5ea8be7415ce46a903f685472.png)
 
-### 归一化（Normalization）
+### 1.2 归一化（Normalization）
 
 - Layer Normalization（LN）vs Batch Normalization（BN）
 
@@ -37,7 +37,7 @@
 		- 优点：不依赖batch size和序列长度
 		- 适用于RNN、Transformer等序列模型
 
-### Pre-Norm vs Post-Norm
+### 1.3 Pre-Norm vs Post-Norm
 
 - 结构对比图
 	-  
@@ -52,7 +52,7 @@
 	- 适合深层网络（如GPT-3、LLaMA）
 	- 说明：下图中LN和F不能互换位置，因为LN是正态分布，数值范围较小
 
-### Multi-Head Self-Attention
+### 1.4 Multi-Head Self-Attention
 
 - 为什么Q、K、V使用不同的投影矩阵
 
@@ -64,7 +64,7 @@
 
 - 加速技术：KV-Cache、Flash Attention、PagedAttention
 
-### 位置编码（Positional Encoding）
+### 1.5 位置编码（Positional Encoding）
 
 - 绝对位置编码：正弦/余弦函数，可学习位置嵌入
 
@@ -80,7 +80,7 @@
 
 ## 二、数据处理
 
-### 分词（Tokenization）
+### 2.1 分词（Tokenization）
 
 - 分词粒度
 
@@ -99,7 +99,7 @@
 			- 英文词表：est, er, ing（均为常见英文词缀）
 			- 中文词表：中国，人民币（均为中文完整词语）
 
-### BPE（Byte Pair Encoding）
+### 2.2 BPE（Byte Pair Encoding）
 
 - 应用：GPT系列、LLaMA等
 
@@ -149,7 +149,7 @@
 	- 基于UTF-8字节编码，语言无关
 	- 一个汉字可能对应1-3个token
 
-### WordPiece
+### 2.3 WordPiece
 
 - 应用：BERT、DistilBERT
 
@@ -157,7 +157,7 @@
 	-  
 ![image](assets/f81488b0ca1e346a06bf5e8b32306be0d16962b4c3c7cd79bb72bbad18c75c8f.png)
 
-### Unigram
+### 2.4 Unigram
 
 - 应用：T5、mBART
 
@@ -168,7 +168,7 @@
 	-  
 ![image](assets/f29b420e5b457c15c43cd93d65826097e3c6837d3bd9041fb04531db5ef01b80.png)
 
-### 词表设计考量
+### 2.5 词表设计考量
 
 - 词表过小
 	- 语义表征能力不足
@@ -189,7 +189,7 @@
 
 ## 三、模型训练
 
-### 显存分析
+### 3.1 显存分析
 
 - 符号定义
 	- b：batch size
@@ -255,7 +255,7 @@
 	- 经验估算：约2.4Φ bytes
 	- 示例：7B模型推理约需 2.4 × 7 ≈ 16.8GB显存
 
-### 数值精度
+### 3.2 数值精度
 
 - FP32（单精度）：4 bytes，训练默认精度
 
@@ -270,7 +270,7 @@
 	- 前向/反向传播：FP16/BF16
 	- 参数更新：FP32（避免精度损失）
 
-### 训练流程
+### 3.3 训练流程
 
 - 预训练（Pre-training）
 	- 数据：大规模无监督文本
@@ -280,7 +280,7 @@
 	- 数据：高质量问答对
 	- 目标：指令遵循能力
 
-### 学习率调度
+### 3.4 学习率调度
 
 - Warmup阶段：1e-7 → 1e-4（学习慢时调高）
 
@@ -290,7 +290,7 @@
 
 - 动态调整：代码中监控loss震荡，自动降低学习率
 
-### Batch Size选择
+### 3.5 Batch Size选择
 
 - 过小：梯度估计方差大，训练不稳定（学习抖动）
 
@@ -303,7 +303,7 @@
 
 ## 四、参数高效微调（PEFT）
 
-### 全量微调的挑战
+### 4.1 全量微调的挑战
 
 - 参数量大，显存需求高（16倍参数量）
 	- 示例：6B参数模型，batch_size=10
@@ -323,7 +323,7 @@
 
 - 灾难性遗忘风险
 
-### Prompt Tuning
+### 4.2 Prompt Tuning
 
 - 在输入前添加可学习的软提示（Soft Prompt）
 
@@ -334,7 +334,7 @@
 
 - 适合：任务切换频繁的场景
 
-### Prefix Tuning
+### 4.3 Prefix Tuning
 
 - 在每层Attention的K、V前添加可学习前缀
 
@@ -345,7 +345,7 @@
 
 - 参数量：前缀长度 × 层数 × 隐藏维度 × 2
 
-### Adapter Tuning
+### 4.4 Adapter Tuning
 
 - 在Transformer层中插入小型适配器模块
 
@@ -353,7 +353,7 @@
 
 - 参数量：约原模型的1-5%
 
-### LoRA（Low-Rank Adaptation）
+### 4.5 LoRA（Low-Rank Adaptation）
 
 - 核心思想：用低秩矩阵近似权重更新 ΔW = BA
 
@@ -366,7 +366,7 @@
 
 - 变体：QLoRA（量化+LoRA）、DoRA、LoRA+
 
-### 参数类型注意事项
+### 4.6 参数类型注意事项
 
 - 可训练参数建议使用FP32，避免NaN/Inf
 
@@ -374,7 +374,7 @@
 
 ## 五、推理优化
 
-### 推理两阶段
+### 5.1 推理两阶段
 
 - Prefill阶段
 	- 处理输入prompt
@@ -402,7 +402,7 @@
 	- Prefill：prompt长度已知，可精确预分配显存
 	- Decode：生成长度未知，需动态管理KV Cache
 
-### KV Cache
+### 5.2 KV Cache
 
 - 作用：缓存历史token的K、V向量，避免重复计算
 
@@ -416,7 +416,7 @@
 	- 稀疏：选择性保留重要token
 	- 共享：GQA、MQA
 
-### Flash Attention
+### 5.3 Flash Attention
 
 - 核心思想：通过重新设计注意力计算顺序，减少HBM（显存）访问，利用SRAM（片上缓存）加速
 
@@ -474,7 +474,7 @@
 	- 训练加速：节省显存，增大batch size
 	- 推理优化：结合KV Cache使用
 
-### PagedAttention（vLLM）
+### 5.4 PagedAttention（vLLM）
 
 - 核心思想：借鉴OS虚拟内存分页机制管理KV Cache
 
@@ -501,7 +501,7 @@
 	- 显存利用率：20-40% → 接近100%
 	- 吞吐量提升2-4倍
 
-### Continuous Batching
+### 5.5 Continuous Batching
 
 - 传统Static Batching
 	- 等待所有请求完成才处理下一批
@@ -519,7 +519,7 @@
 - 批处理优势
 	- 多条数据只需加载一次模型参数，提高吞吐
 
-### 解码策略
+### 5.6 解码策略
 
 - 贪心解码（Greedy）：每步选概率最高的token
 
@@ -541,7 +541,7 @@
 	- 全局最优与计算成本的折中
 	- 缺点：不支持流式输出（需走完才能确定最优路径）
 
-### 投机解码（Speculative Decoding）
+### 5.7 投机解码（Speculative Decoding）
 
 - 原理：用小模型快速生成草稿，大模型并行验证
 
@@ -549,7 +549,7 @@
 
 ## 六、vLLM推理引擎
 
-### 编译安装
+### 6.1 编译安装
 
 - SSL配置
 	- 在setup.py中添加：
@@ -564,7 +564,7 @@
 	- AssertionError: distutils/core.py
 	- 解决：export SETUPTOOLS_USE_DISTUTILS=stdlib
 
-### 目录结构
+### 6.2 目录结构
 
 - 核心组件
 
@@ -606,13 +606,13 @@
 
 	- plugins：插件扩展系统
 
-### LLM初始化
+### 6.3 LLM初始化
 
 - 时序图
 	-  
 ![image](assets/df6485df-fc81-44ff-1b39-74b26fc931fb.png)
 
-### generate接口
+### 6.4 generate接口
 
 - 功能：用于批量生成文本，接受提示(prompts)和生成参数，通过语言模型生成相应输出
 
@@ -674,7 +674,7 @@
 
 ## 七、RAG（检索增强生成）
 
-### 解决的问题
+### 7.1 解决的问题
 
 - 知识时效性：训练数据有截止日期
 
@@ -684,7 +684,7 @@
 
 - 成本问题：微调成本高，效果不确定
 
-### 系统架构
+### 7.2 系统架构
 
 - 核心公式：RAG = 检索器 + 生成器（推理能力+记忆力=人工智能）
 
@@ -700,7 +700,7 @@
 	- 用户Query → 向量化 → 检索相关文档 → 构建Prompt → LLM生成
 	- 提示词：问题和知识库里检索的答案，一并作为提示词传入大模型
 
-### 文档处理
+### 7.3 文档处理
 
 - 支持格式：PDF、Word、PPT、Excel、HTML、Markdown
 
@@ -716,7 +716,7 @@
 		- 切分原因：大模型输入长度有限制
 		- 通常分片时，会带上下一段一部分，缓减知识点被分割的可能
 
-### 向量检索
+### 7.4 向量检索
 
 - 相似度度量
 	- 余弦相似度（推荐）
@@ -729,7 +729,7 @@
 
 - 混合检索：稀疏 + 稠密检索结合
 
-### 重排序（Rerank）
+### 7.5 重排序（Rerank）
 
 - 作用：对召回结果精排，提升相关性
 
@@ -738,7 +738,7 @@
 	- 代表模型：bge-reranker、cohere-rerank
 	- 说明：将召回的知识和用户问题通过专用model处理，得到分数排序
 
-### 高级检索技术
+### 7.6 高级检索技术
 
 - 知识图谱检索
 	- 实体→节点，关系→边
@@ -756,7 +756,7 @@
 - 关键词索引
 	- 每个知识点对应几个关键词，用户问题命中关键词就召回对应节点
 
-### HyDE（Hypothetical Document Embeddings）
+### 7.7 HyDE（Hypothetical Document Embeddings）
 
 - 核心思想：生成假设答案辅助检索（抄作业的方式）
 
@@ -770,7 +770,7 @@
 
 - 优势：融合向量既有问题信息，也有答案模式信息，增强召回效果
 
-### 多轮对话
+### 7.8 多轮对话
 
 - 上下文关联判断：分类模型判断是否需要历史上下文
 
@@ -778,7 +778,7 @@
 
 ## 八、多模态
 
-### Vision Transformer（ViT）
+### 8.1 Vision Transformer（ViT）
 
 - 核心思想：将图像切分为Patch，作为序列输入Transformer
 
@@ -808,7 +808,7 @@
 
 	- 相对位置编码：编码patch间相对位置
 
-### CNN vs Transformer
+### 8.2 CNN vs Transformer
 
 - CNN
 	- 局部感受野，需要深层网络捕获全局
@@ -841,7 +841,7 @@
 	- 数据：4亿图文对
 	- 损失：InfoNCE对比损失
 
-### CLIP负样本构建
+### 8.4 CLIP负样本构建
 
 - Batch内负样本：除对角线外均为负样本
 	-  
@@ -852,7 +852,7 @@
 	- 过大（类别数小时）：负样本不准确
 	- 示例：识别狗时，负样本可能也是狗（只是不同的狗），导致负样本质量下降
 
-### CLIP Zero-Shot分类
+### 8.5 CLIP Zero-Shot分类
 
 -  
 ![image](assets/482675da44b27d1b0dc14b94d310232e65bf5fff1554451867eaf9bf3d7ae920.png)
@@ -867,7 +867,7 @@
 	- 训练集够大，包含类似图像分布和相近概念
 	- 将分类问题转换为检索问题
 
-### SAM（Segment Anything Model）
+### 8.6 SAM（Segment Anything Model）
 
 - Meta开发的通用图像分割模型，可对图像中任意对象进行分割
 
@@ -914,7 +914,7 @@
 	- 半自动阶段：模型预测 + 人工补充
 	- 全自动阶段：模型自动生成 + 质量过滤
 
-### 多模态大模型
+### 8.7 多模态大模型
 
 - BLIP/BLIP-2：图文理解与生成
 	-  
@@ -924,7 +924,7 @@
 
 - GPT-4V/Gemini：原生多模态大模型
 
-### 目标检测应用
+### 8.8 目标检测应用
 
 -  
 ![image](assets/b830e115025c430bf4f455fc8a9a371933f1090e0c8230e643797515a58cc932.png)
@@ -935,7 +935,7 @@
 
 ## 九、模型量化
 
-### 量化基础
+### 9.1 量化基础
 
 - 量化原理图
 	-  
@@ -953,7 +953,7 @@
 	- INT4：4位整数
 	- FP8：8位浮点
 
-### 量化方法
+### 9.2 量化方法
 
 - PTQ（Post-Training Quantization）
 	- 训练后量化，无需重新训练
@@ -963,7 +963,7 @@
 	- 训练时模拟量化
 	- 精度损失小，成本高
 
-### TPU-MLIR
+### 9.3 TPU-MLIR
 
 - 功能：将MLIR模型量化编译为TPU可执行格式
 
@@ -975,7 +975,7 @@
 
 ## 十、Agent与工具调用
 
-### 角色智能体构建
+### 10.1 角色智能体构建
 
 - 基座模型选择：算力允许下越大越好
 
@@ -996,7 +996,7 @@
 	- 直接推理
 	- 结合RAG增强知识
 
-### MCP（Model Context Protocol）
+### 10.2 MCP（Model Context Protocol）
 
 - 架构图
 	-  
@@ -1014,7 +1014,7 @@
 
 ## 十一、Scaling Law
 
-### 核心发现
+### 11.1 核心发现
 
 - Scaling Law示意图
 	-  
@@ -1032,13 +1032,13 @@
 	- 当其中一个因素受限时，模型表现随另一因素增加变好，但会逐渐衰减
 	- 在算力不足下，小模型收敛更快；但大模型效果上限更高（损失函数更小）
 
-### Chinchilla Law
+### 11.2 Chinchilla Law
 
 - 最优配置：参数量和数据量应同步扩展
 
 - 经验法则：1B参数约需20B tokens
 
-### 涌现能力（Emergent Abilities）
+### 11.3 涌现能力（Emergent Abilities）
 
 - 定义：小模型不具备、大模型突然出现的能力
 
@@ -1049,22 +1049,22 @@
 
 ## 十二、大模型发展脉络
 
-### 大模型内核
+### 12.1 大模型内核
 
 -  
 ![image](assets/c80a259e6e2b2dbfb073fbc14436d67f50a9ff9af6fe00076ce99d6b327a8a1a.png)
 
-### 机器学习四个范式
+### 12.2 机器学习四个范式
 
 -  
 ![image](assets/e8fc5047a6cdf34e9d21bc6b4f4c39766bbefcaff55db657608628dee8c3f9aa.png)
 
-### 基于大模型的对话系统架构
+### 12.3 基于大模型的对话系统架构
 
 -  
 ![image](assets/9c3ce99ada551821660dff14a8e2ec56ae9f3b227242a2c7fe783d58b78f5d94.png)
 
-### 里程碑模型
+### 12.4 里程碑模型
 
 - GPT系列：GPT-1 → GPT-2 → GPT-3 → GPT-4
 
@@ -1074,7 +1074,7 @@
 
 - 国产模型：ChatGLM、Qwen、Baichuan、DeepSeek
 
-### 技术演进
+### 12.5 技术演进
 
 - 注意力优化：MHA → MQA → GQA
 
