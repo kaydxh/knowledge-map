@@ -1,5 +1,83 @@
 # 大模型技术知识库
 
+## 目录
+
+- [一、Transformer架构](#一transformer架构)
+  - [1.1 核心结构](#11-核心结构)
+  - [1.2 归一化（Normalization）](#12-归一化normalization)
+  - [1.3 Pre-Norm vs Post-Norm](#13-pre-norm-vs-post-norm)
+  - [1.4 Multi-Head Self-Attention](#14-multi-head-self-attention)
+  - [1.5 位置编码（Positional Encoding）](#15-位置编码positional-encoding)
+- [二、数据处理](#二数据处理)
+  - [2.1 分词（Tokenization）](#21-分词tokenization)
+  - [2.2 BPE（Byte Pair Encoding）](#22-bpebyte-pair-encoding)
+  - [2.3 WordPiece](#23-wordpiece)
+  - [2.4 Unigram](#24-unigram)
+  - [2.5 词表设计考量](#25-词表设计考量)
+- [三、模型训练](#三模型训练)
+  - [3.1 显存分析](#31-显存分析)
+  - [3.2 数值精度](#32-数值精度)
+  - [3.3 训练流程](#33-训练流程)
+  - [3.4 学习率调度](#34-学习率调度)
+  - [3.5 Batch Size选择](#35-batch-size选择)
+- [四、参数高效微调（PEFT）](#四参数高效微调peft)
+  - [4.1 全量微调的挑战](#41-全量微调的挑战)
+  - [4.2 Prompt Tuning](#42-prompt-tuning)
+  - [4.3 Prefix Tuning](#43-prefix-tuning)
+  - [4.4 Adapter Tuning](#44-adapter-tuning)
+  - [4.5 LoRA（Low-Rank Adaptation）](#45-loralow-rank-adaptation)
+  - [4.6 参数类型注意事项](#46-参数类型注意事项)
+- [五、推理优化](#五推理优化)
+  - [5.1 推理两阶段](#51-推理两阶段)
+  - [5.2 KV Cache](#52-kv-cache)
+  - [5.3 Flash Attention](#53-flash-attention)
+  - [5.4 PagedAttention（vLLM）](#54-pagedattentionvllm)
+  - [5.5 Continuous Batching](#55-continuous-batching)
+  - [5.6 解码策略](#56-解码策略)
+  - [5.7 投机解码（Speculative Decoding）](#57-投机解码speculative-decoding)
+- [六、vLLM推理引擎](#六vllm推理引擎)
+  - [6.1 编译安装](#61-编译安装)
+  - [6.2 目录结构](#62-目录结构)
+  - [6.3 LLM初始化](#63-llm初始化)
+  - [6.4 generate接口](#64-generate接口)
+- [七、RAG（检索增强生成）](#七rag检索增强生成)
+  - [7.1 解决的问题](#71-解决的问题)
+  - [7.2 系统架构](#72-系统架构)
+  - [7.3 文档处理](#73-文档处理)
+  - [7.4 向量检索](#74-向量检索)
+  - [7.5 重排序（Rerank）](#75-重排序rerank)
+  - [7.6 高级检索技术](#76-高级检索技术)
+  - [7.7 HyDE（Hypothetical Document Embeddings）](#77-hydehypothetical-document-embeddings)
+  - [7.8 多轮对话](#78-多轮对话)
+- [八、多模态](#八多模态)
+  - [8.1 Vision Transformer（ViT）](#81-vision-transformervit)
+  - [8.2 CNN vs Transformer](#82-cnn-vs-transformer)
+  - [8.3 CLIP](#83-clip)
+  - [8.4 CLIP负样本构建](#84-clip负样本构建)
+  - [8.5 CLIP Zero-Shot分类](#85-clip-zero-shot分类)
+  - [8.6 SAM（Segment Anything Model）](#86-samsegment-anything-model)
+  - [8.7 多模态大模型](#87-多模态大模型)
+  - [8.8 目标检测应用](#88-目标检测应用)
+- [九、模型量化](#九模型量化)
+  - [9.1 量化基础](#91-量化基础)
+  - [9.2 量化方法](#92-量化方法)
+  - [9.3 TPU-MLIR](#93-tpu-mlir)
+- [十、Agent与工具调用](#十agent与工具调用)
+  - [10.1 角色智能体构建](#101-角色智能体构建)
+  - [10.2 MCP（Model Context Protocol）](#102-mcpmodel-context-protocol)
+- [十一、Scaling Law](#十一scaling-law)
+  - [11.1 核心发现](#111-核心发现)
+  - [11.2 Chinchilla Law](#112-chinchilla-law)
+  - [11.3 涌现能力（Emergent Abilities）](#113-涌现能力emergent-abilities)
+- [十二、大模型发展脉络](#十二大模型发展脉络)
+  - [12.1 大模型内核](#121-大模型内核)
+  - [12.2 机器学习四个范式](#122-机器学习四个范式)
+  - [12.3 基于大模型的对话系统架构](#123-基于大模型的对话系统架构)
+  - [12.4 里程碑模型](#124-里程碑模型)
+  - [12.5 技术演进](#125-技术演进)
+
+---
+
 ## 一、Transformer架构
 
 ### 1.1 核心结构
@@ -822,7 +900,7 @@
 	- 与NLP统一架构，便于多模态融合
 	- 最大优势：NLP也用transformers，CV和NLP可以结合起来
 
-### CLIP
+### 8.3 CLIP
 
 - 解决的问题
 	- 传统分类模型类别固定
