@@ -6,10 +6,14 @@
 	- [目录](#目录)
 	- [一、Transformer架构](#一transformer架构)
 		- [1.1 核心结构](#11-核心结构)
-		- [1.2 归一化（Normalization）](#12-归一化normalization)
-		- [1.3 Pre-Norm vs Post-Norm](#13-pre-norm-vs-post-norm)
-		- [1.4 Multi-Head Self-Attention](#14-multi-head-self-attention)
-		- [1.5 位置编码（Positional Encoding）](#15-位置编码positional-encoding)
+		- [1.2 隐藏层（Hidden Layer）](#12-隐藏层hidden-layer)
+		- [1.3 归一化（Normalization）](#13-归一化normalization)
+		- [1.4 Pre-Norm vs Post-Norm](#14-pre-norm-vs-post-norm)
+		- [1.5 Multi-Head Self-Attention](#15-multi-head-self-attention)
+			- [1.5.1 Self-Attention计算过程详解](#151-self-attention计算过程详解)
+			- [1.5.2 Multi-Head机制](#152-multi-head机制)
+			- [1.5.3 Self-Attention vs Cross-Attention](#153-self-attention-vs-cross-attention)
+		- [1.6 位置编码（Positional Encoding）](#16-位置编码positional-encoding)
 	- [二、数据处理](#二数据处理)
 		- [2.1 分词（Tokenization）](#21-分词tokenization)
 		- [2.2 BPE（Byte Pair Encoding）](#22-bpebyte-pair-encoding)
@@ -17,7 +21,11 @@
 		- [2.4 Unigram](#24-unigram)
 		- [2.5 词表设计考量](#25-词表设计考量)
 	- [三、模型训练](#三模型训练)
-		- [3.1 显存分析](#31-显存分析)
+		- [3.1 前向传播与反向传播](#31-前向传播与反向传播)
+			- [3.1.1 前向传播（Forward Propagation）](#311-前向传播forward-propagation)
+			- [3.1.2 反向传播（Backward Propagation）](#312-反向传播backward-propagation)
+			- [3.1.3 训练 vs 推理的前向传播对比](#313-训练-vs-推理的前向传播对比)
+		- [3.2 显存分析](#32-显存分析)
 		- [3.2 数值精度](#32-数值精度)
 		- [3.3 训练流程](#33-训练流程)
 		- [3.4 学习率调度](#34-学习率调度)
@@ -31,6 +39,11 @@
 		- [4.6 参数类型注意事项](#46-参数类型注意事项)
 	- [五、推理优化](#五推理优化)
 		- [5.1 推理两阶段](#51-推理两阶段)
+			- [5.1.1 Prefill阶段详解（预填充/首Token阶段）](#511-prefill阶段详解预填充首token阶段)
+			- [5.1.2 Decode阶段详解（解码/自回归生成阶段）](#512-decode阶段详解解码自回归生成阶段)
+			- [5.1.3 实际例子：问"北京的首都是哪里？"](#513-实际例子问北京的首都是哪里)
+			- [5.1.4 显存占用公式](#514-显存占用公式)
+			- [5.1.5 Prefill vs Decode对比总结](#515-prefill-vs-decode对比总结)
 		- [5.2 KV Cache](#52-kv-cache)
 		- [5.3 Flash Attention](#53-flash-attention)
 		- [5.4 PagedAttention（vLLM）](#54-pagedattentionvllm)
@@ -100,7 +113,103 @@
 	-  
 ![image](assets/88411e8c6689ae89bc2af2b5875c599faba2a4e5ea8be7415ce46a903f685472.png)
 
-### 1.2 归一化（Normalization）
+### 1.2 隐藏层（Hidden Layer）
+
+- 定义：位于输入层和输出层之间的层，负责学习和提取特征
+
+- 位置
+	```
+	输入层（Embedding）
+	    ↓
+	┌─────────────────────────────────┐
+	│ 隐藏层 × L层（Transformer Block）│
+	│  ┌───────────────────────────┐  │
+	│  │ Multi-Head Self-Attention │  │ ← 隐藏层组件1
+	│  └───────────────────────────┘  │
+	│              ↓                  │
+	│  ┌───────────────────────────┐  │
+	│  │ FFN（Feed-Forward Network）│  │ ← 隐藏层组件2
+	│  └───────────────────────────┘  │
+	└─────────────────────────────────┘
+	    ↓
+	输出层（LM Head）
+	```
+
+- 隐藏维度（hidden_size / d）
+	- 每个token在隐藏层中表示为d维向量
+	- 决定模型容量和表达能力
+	- 示例：LLaMA-7B的hidden_size=4096，每个token是4096维向量
+
+- FFN层（Feed-Forward Network，前馈神经网络）
+
+	- **注意**：FFN是Transformer的一个**组件**，不是"前向传播"
+		| 概念 | 全称 | 含义 |
+		|------|------|------|
+		| FFN | Feed-Forward Network | Transformer中的一个**子模块** |
+		| 前向传播 | Forward Propagation | 数据流经整个网络的**计算过程** |
+
+	- 位置：在Self-Attention之后
+		```
+		输入 → Attention → FFN → 输出
+		                    ↑
+		              这是一个组件
+		```
+
+	- 结构：两层全连接 + 激活函数
+		```
+		FFN(x) = GELU(x × W₁ + b₁) × W₂ + b₂
+		
+		x (d) → 扩展 → (4d) → 压缩 → (d)
+		         ↑              ↑
+		   增加表达能力    恢复原维度
+		```
+
+	- 为什么先扩展再压缩？
+		- 先扩展（d→4d）：在更高维空间学习复杂特征，增加非线性表达能力
+		- 再压缩（4d→d）：保持维度一致，便于残差连接和堆叠多层
+
+	- 作用
+		- 对每个token**独立**进行非线性变换（不同token之间不交互）
+		- **存储参数化知识**：研究表明FFN层存储了大量事实性知识
+		- 与Attention的分工：Attention负责"token间交互"，FFN负责"特征变换"
+
+	- 参数量
+		```
+		W₁: d × 4d
+		W₂: 4d × d
+		总计: 8d² (约占Transformer Block参数的2/3)
+		```
+
+	- 与前向传播的关系
+		```
+		前向传播（整个计算过程）
+		├── Embedding层
+		├── Transformer Block 1
+		│   ├── Self-Attention
+		│   └── FFN  ← 这是一个组件
+		├── Transformer Block 2
+		│   ├── Self-Attention
+		│   └── FFN  ← 这是一个组件
+		├── ...
+		└── 输出层
+		```
+		- FFN是网络的**零件**（一个具体的层）
+		- 前向传播是**工作流程**（数据流经所有零件的过程）
+
+- 常见大模型隐藏层配置
+
+	| 模型 | 隐藏维度(d) | 层数(L) | 注意力头数(h) | FFN中间维度 |
+	|------|-------------|---------|---------------|-------------|
+	| GPT-2 Small | 768 | 12 | 12 | 3072 (4×d) |
+	| LLaMA-7B | 4096 | 32 | 32 | 11008 (~2.7×d) |
+	| LLaMA-70B | 8192 | 80 | 64 | 28672 (~3.5×d) |
+
+- 为什么叫"隐藏"层？
+	- 不直接与外部交互，只在网络内部传递
+	- 用户视角：输入 → [黑盒] → 输出
+	- 内部视角：输入 → [隐藏层1] → [隐藏层2] → ... → [隐藏层L] → 输出
+
+### 1.3 归一化（Normalization）
 
 - Layer Normalization（LN）vs Batch Normalization（BN）
 
@@ -117,7 +226,7 @@
 		- 优点：不依赖batch size和序列长度
 		- 适用于RNN、Transformer等序列模型
 
-### 1.3 Pre-Norm vs Post-Norm
+### 1.4 Pre-Norm vs Post-Norm
 
 - 结构对比图
 	-  
@@ -132,7 +241,7 @@
 	- 适合深层网络（如GPT-3、LLaMA）
 	- 说明：下图中LN和F不能互换位置，因为LN是正态分布，数值范围较小
 
-### 1.4 Multi-Head Self-Attention
+### 1.5 Multi-Head Self-Attention
 
 - 为什么Q、K、V使用不同的投影矩阵
 
@@ -144,7 +253,7 @@
 
 - 加速技术：KV-Cache、Flash Attention、PagedAttention
 
-#### 1.4.1 Self-Attention计算过程详解
+#### 1.5.1 Self-Attention计算过程详解
 
 - 核心公式
 	```
@@ -240,38 +349,129 @@
 	        └── ×W_V ──→ V ───┴──────────────────────────────────────────────┘
 	```
 
-#### 1.4.2 Multi-Head机制
+#### 1.5.2 Multi-Head机制
 
-- 核心思想：多个注意力头并行计算，捕获不同的语义关系
+- 核心思想：多个注意力头**并行**计算，捕获不同的语义关系
 
-- 计算过程
+- 为什么需要Multi-Head？
+	- 单头Attention只能学习一种注意力模式
+	- 多头可以同时关注不同类型的信息（语法、语义、位置等）
+	- 类比：多个"专家"从不同角度分析同一句话
+
+- 完整计算过程（以h=8头，d=512为例）
+
+	- **Step 1：分割隐藏维度**
 	```
-	head_i = Attention(X×W_Q^i, X×W_K^i, X×W_V^i)
+	原始维度：d = 512
+	头数：h = 8
+	每头维度：d_k = d_v = d/h = 512/8 = 64
+	```
+
+	- **Step 2：每个头独立计算Q、K、V**
+	```
+	输入 X: (seq_len, 512)
 	
-	MultiHead(X) = Concat(head_1, head_2, ..., head_h) × W_O
+	Head 1: Q₁ = X × W_Q¹, K₁ = X × W_K¹, V₁ = X × W_V¹  → 各(seq_len, 64)
+	Head 2: Q₂ = X × W_Q², K₂ = X × W_K², V₂ = X × W_V²  → 各(seq_len, 64)
+	...
+	Head 8: Q₈ = X × W_Q⁸, K₈ = X × W_K⁸, V₈ = X × W_V⁸  → 各(seq_len, 64)
+	
+	每个头有独立的投影矩阵 W_Q^i, W_K^i, W_V^i (512×64)
 	```
 
-- 多头的作用
+	- **Step 3：每个头独立计算Attention**
+	```
+	head_i = Attention(Q_i, K_i, V_i)
+	       = softmax(Q_i × K_i^T / √d_k) × V_i
+	       → (seq_len, 64)
+	
+	8个头并行计算，互不干扰
+	```
+
+	- **Step 4：拼接所有头的输出**
+	```
+	Concat = [head_1; head_2; ...; head_8]
+	       = (seq_len, 64×8) = (seq_len, 512)
+	```
+
+	- **Step 5：通过输出投影矩阵W_O**
+	```
+	MultiHead(X) = Concat × W_O
+	             = (seq_len, 512) × (512, 512)
+	             = (seq_len, 512)
+	
+	W_O 的作用：融合各头信息，恢复原始维度
+	```
+
+- 计算流程图
+	```
+	                    ┌─→ W_Q¹ ─→ Q₁ ─┐
+	                    ├─→ W_K¹ ─→ K₁ ─┼─→ Attention₁ ─→ head₁ ─┐
+	                    ├─→ W_V¹ ─→ V₁ ─┘                        │
+	                    │                                         │
+	                    ├─→ W_Q² ─→ Q₂ ─┐                        │
+	输入X (seq, 512) ───┼─→ W_K² ─→ K₂ ─┼─→ Attention₂ ─→ head₂ ─┼─→ Concat ─→ W_O ─→ 输出 (seq, 512)
+	                    ├─→ W_V² ─→ V₂ ─┘                        │
+	                    │                                         │
+	                    │        ...（共8个头）                    │
+	                    │                                         │
+	                    ├─→ W_Q⁸ ─→ Q₈ ─┐                        │
+	                    ├─→ W_K⁸ ─→ K₈ ─┼─→ Attention₈ ─→ head₈ ─┘
+	                    └─→ W_V⁸ ─→ V₈ ─┘
+	```
+
+- 实际例子：分析"我爱北京天安门"
+
+	| 头 | 关注模式 | 注意力分布示例 |
+	|------|----------|----------------|
+	| Head 1 | 语法关系 | "爱"强关注主语"我"和宾语"北京天安门" |
+	| Head 2 | 相邻位置 | 每个词强关注前后相邻的词 |
+	| Head 3 | 语义相似 | "北京"和"天安门"互相强关注（地点相关）|
+	| Head 4 | 长距离依赖 | "我"和"天安门"建立关联（人-地点）|
+	| ... | ... | ... |
+
+	- 最终输出融合了8种不同视角的信息
+
+- 多头的作用总结
 	- Head 1：可能关注语法关系（主谓宾）
 	- Head 2：可能关注语义相似性
 	- Head 3：可能关注位置临近性
+	- Head 4：可能关注长距离依赖
 	- ...
+	- 注意：每个头的具体功能是**自动学习**的，不是人为设定的
 
 - 参数量计算
 	```
-	单头：3 × d × d_k（Q、K、V各一个投影矩阵）
-	多头：h × 3 × d × (d/h) + d × d = 4d²
-	      └─ h个头 ─┘   └─ d_k=d/h ─┘  └─ W_O ─┘
+	每个头的参数：
+	  W_Q^i: d × d_k = 512 × 64
+	  W_K^i: d × d_k = 512 × 64
+	  W_V^i: d × d_v = 512 × 64
+	  
+	h个头总参数：h × 3 × d × (d/h) = 3 × d × d = 3d²
+	
+	输出投影W_O：d × d = d²
+	
+	Multi-Head总参数：3d² + d² = 4d²
+	
+	示例：d=512 → 4 × 512² = 1,048,576 ≈ 1M参数
 	```
 
-#### 1.4.3 Self-Attention vs Cross-Attention
+- 为什么d_k = d/h（维度分割）？
+	| 方案 | 每头维度 | 总计算量 | 问题 |
+	|------|----------|----------|------|
+	| d_k = d（不分割）| 512 | h × d² = 8d² | 计算量太大 |
+	| d_k = d/h（分割）| 64 | h × (d/h)² × d = d² | 计算量与单头相同 |
+
+	- 分割维度使Multi-Head的计算量与单头Attention相同，但表达能力更强
+
+#### 1.5.3 Self-Attention vs Cross-Attention
 
 | 类型 | Q来源 | K/V来源 | 应用场景 |
 |------|-------|---------|----------|
 | Self-Attention | 自身序列 | 自身序列 | Encoder、Decoder |
 | Cross-Attention | Decoder序列 | Encoder输出 | Encoder-Decoder结构 |
 
-### 1.5 位置编码（Positional Encoding）
+### 1.6 位置编码（Positional Encoding）
 
 - 绝对位置编码：正弦/余弦函数，可学习位置嵌入
 
