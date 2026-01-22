@@ -144,6 +144,133 @@
 
 - 加速技术：KV-Cache、Flash Attention、PagedAttention
 
+#### 1.4.1 Self-Attention计算过程详解
+
+- 核心公式
+	```
+	Attention(Q, K, V) = softmax(QK^T / √d_k) × V
+	```
+
+- 计算步骤（以"我爱北京"为例）
+
+	- **Step 1：输入Embedding**
+		```
+		输入序列：["我", "爱", "北京"]
+		Embedding后：X = [x₁, x₂, x₃]，每个xᵢ是d维向量（如512维）
+		```
+
+	- **Step 2：生成Q、K、V矩阵**
+		```
+		Q = X × W_Q  （Query：我要查询什么）
+		K = X × W_K  （Key：我能提供什么信息）
+		V = X × W_V  （Value：我的实际内容）
+		
+		其中W_Q、W_K、W_V是可学习的投影矩阵（d×d_k）
+		```
+		- 直观理解
+			- Q（Query）：当前token想要关注什么
+			- K（Key）：每个token的"标签"，用于被查询匹配
+			- V（Value）：每个token的实际信息内容
+
+	- **Step 3：计算注意力分数（QK^T）**
+		```
+		         Q（3×d_k）    K^T（d_k×3）    Score（3×3）
+		         ┌─────┐      ┌─────────┐     ┌─────────────┐
+		    "我" │ q₁  │      │k₁ k₂ k₃│     │s₁₁ s₁₂ s₁₃│
+		    "爱" │ q₂  │  ×   │         │  =  │s₂₁ s₂₂ s₂₃│
+		  "北京" │ q₃  │      │         │     │s₃₁ s₃₂ s₃₃│
+		         └─────┘      └─────────┘     └─────────────┘
+		
+		s_ij = q_i · k_j （第i个token对第j个token的注意力分数）
+		```
+		- 例如：s₁₂ = q₁ · k₂ 表示"我"对"爱"的关注程度
+
+	- **Step 4：缩放（Scale）**
+		```
+		Score_scaled = Score / √d_k
+		```
+		- 为什么要缩放？
+			- 点积结果可能很大（方差为d_k）
+			- 大数值导致softmax梯度趋近0（梯度消失）
+			- 除以√d_k使方差归一化为1
+
+	- **Step 5：Mask（可选，Decoder专用）**
+		```
+		Causal Mask（因果掩码）：
+		         "我"  "爱" "北京"
+		    "我" [ 0   -∞    -∞  ]
+		    "爱" [ 0    0    -∞  ]
+		  "北京" [ 0    0     0  ]
+		
+		-∞位置经过softmax后变为0，确保只能看到历史信息
+		```
+
+	- **Step 6：Softmax归一化**
+		```
+		Attention_weights = softmax(Score_scaled, dim=-1)
+		
+		每行归一化，使权重和为1：
+		         "我"  "爱" "北京"
+		    "我" [1.0   0     0  ]  ← 只能看自己
+		    "爱" [0.3  0.7    0  ]  ← "爱"更关注自己
+		  "北京" [0.1  0.2   0.7 ]  ← "北京"最关注自己
+		```
+
+	- **Step 7：加权求和得到输出**
+		```
+		Output = Attention_weights × V
+		
+		         Weights（3×3）     V（3×d_v）      Output（3×d_v）
+		         ┌───────────┐     ┌─────┐         ┌─────┐
+		         │1.0 0   0  │     │ v₁  │         │ o₁  │
+		         │0.3 0.7 0  │  ×  │ v₂  │    =    │ o₂  │
+		         │0.1 0.2 0.7│     │ v₃  │         │ o₃  │
+		         └───────────┘     └─────┘         └─────┘
+		
+		o₂ = 0.3×v₁ + 0.7×v₂ + 0×v₃
+		   = "爱"融合了30%的"我"信息 + 70%的自身信息
+		```
+
+- 完整计算流程图
+	```
+	输入X ──┬── ×W_Q ──→ Q ───┐
+	        │                  │
+	        ├── ×W_K ──→ K ───┼──→ QK^T ──→ Scale ──→ Mask ──→ Softmax ──→ ×V ──→ Output
+	        │                  │                                              │
+	        └── ×W_V ──→ V ───┴──────────────────────────────────────────────┘
+	```
+
+#### 1.4.2 Multi-Head机制
+
+- 核心思想：多个注意力头并行计算，捕获不同的语义关系
+
+- 计算过程
+	```
+	head_i = Attention(X×W_Q^i, X×W_K^i, X×W_V^i)
+	
+	MultiHead(X) = Concat(head_1, head_2, ..., head_h) × W_O
+	```
+
+- 多头的作用
+	- Head 1：可能关注语法关系（主谓宾）
+	- Head 2：可能关注语义相似性
+	- Head 3：可能关注位置临近性
+	- ...
+
+- 参数量计算
+	```
+	单头：3 × d × d_k（Q、K、V各一个投影矩阵）
+	多头：h × 3 × d × (d/h) + d × d = 4d²
+	      └─ h个头 ─┘   └─ d_k=d/h ─┘  └─ W_O ─┘
+	```
+
+#### 1.4.3 Self-Attention vs Cross-Attention
+
+| 类型 | Q来源 | K/V来源 | 应用场景 |
+|------|-------|---------|----------|
+| Self-Attention | 自身序列 | 自身序列 | Encoder、Decoder |
+| Cross-Attention | Decoder序列 | Encoder输出 | Encoder-Decoder结构 |
+
 ### 1.5 位置编码（Positional Encoding）
 
 - 绝对位置编码：正弦/余弦函数，可学习位置嵌入
