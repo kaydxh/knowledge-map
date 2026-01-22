@@ -461,27 +461,108 @@
 	- 处理输入prompt
 	- 计算所有token的KV Cache
 	- 可并行计算，计算密集型
-	- 示意图
-		-  
-![image](assets/e39755667ea361f3ddf2e2a762a92e6a440da6bf6138d35951b84083a1132913.png)
 
 - Decode阶段
 	- 自回归生成token
 	- 每步只计算一个token
 	- 串行执行，访存密集型
-	- 示意图
-		-  
+
+#### 5.1.1 Prefill阶段详解（预填充/首Token阶段）
+
+- 核心任务：处理用户输入的完整prompt，生成第一个输出token
+
+- 计算过程
+	- Step 1：将prompt分词，得到token序列 [t₁, t₂, ..., tₙ]
+	- Step 2：通过Embedding层，将tokens转为向量序列
+	- Step 3：**并行**计算所有token的Q、K、V矩阵
+	- Step 4：计算Self-Attention（所有token同时参与）
+	- Step 5：通过FFN层，输出最后一个位置的logits
+	- Step 6：采样得到第一个生成token，同时**缓存所有K、V值**
+
+- 特点
+	- **计算密集型**：大量矩阵乘法，GPU利用率高
+	- **可并行**：所有prompt token同时计算，一次前向传播
+	- **延迟来源**：用户感知的"首字延迟"（Time To First Token, TTFT）
+
+- 示意图
+	-  
+![image](assets/e39755667ea361f3ddf2e2a762a92e6a440da6bf6138d35951b84083a1132913.png)
+
+#### 5.1.2 Decode阶段详解（解码/自回归生成阶段）
+
+- 核心任务：逐个生成后续token，直到遇到结束符或达到最大长度
+
+- 计算过程（每生成一个token）
+	- Step 1：将上一步生成的token转为Embedding
+	- Step 2：计算**当前token**的Q向量（只有1个token）
+	- Step 3：从KV Cache读取历史所有token的K、V值
+	- Step 4：计算当前Q与所有历史K的Attention
+	- Step 5：通过FFN层，输出当前位置的logits
+	- Step 6：采样得到下一个token，将新的K、V**追加**到Cache
+	- Step 7：重复Step 1-6，直到生成结束
+
+- 特点
+	- **访存密集型**：每步只计算1个token，但需要读取整个KV Cache
+	- **串行执行**：必须等上一个token生成后才能继续
+	- **GPU利用率低**：大部分时间在等待显存读取
+	- **延迟来源**：用户感知的"生成速度"（Tokens Per Second, TPS）
+
+- 示意图
+	-  
 ![image](assets/299c9bc4bfc63846a7b85606e2e05c89fe9154ff964eea5ccb7a98e9dd07a5ab.png)
 
-- 显存占用公式
-	-  
-![image](assets/4f62f039c467ff740baa08ee6509dd1427a1ab252f2999b046c53e38648c8e41.png)
-	- Memory = batch_size × seq_length × hidden_size × layers × 2 × 2
-	- 说明：序列长度、隐藏维度、层数、KV两个、FP16占2字节
+#### 5.1.3 实际例子：问"北京的首都是哪里？"
 
-- Prefill vs Decode显存特点
-	- Prefill：prompt长度已知，可精确预分配显存
-	- Decode：生成长度未知，需动态管理KV Cache
+- 输入prompt："北京的首都是哪里？"（假设分词后为6个token）
+
+- **Prefill阶段**
+	```
+	输入：[北京, 的, 首都, 是, 哪里, ？] （6个token）
+	     ↓ 并行计算（1次前向传播）
+	输出：第一个token "北" + 缓存6个token的KV值
+	耗时：~100ms（首字延迟）
+	```
+
+- **Decode阶段**
+	```
+	Step 1: 输入"北" → 读取KV Cache(6) → 输出"京"，缓存KV(7)
+	Step 2: 输入"京" → 读取KV Cache(7) → 输出"不"，缓存KV(8)
+	Step 3: 输入"不" → 读取KV Cache(8) → 输出"是"，缓存KV(9)
+	Step 4: 输入"是" → 读取KV Cache(9) → 输出"首"，缓存KV(10)
+	Step 5: 输入"首" → 读取KV Cache(10) → 输出"都"，缓存KV(11)
+	Step 6: 输入"都" → 读取KV Cache(11) → 输出"。"，缓存KV(12)
+	Step 7: 输入"。" → 读取KV Cache(12) → 输出"<EOS>"
+	耗时：每step ~20ms，共~140ms
+	```
+
+- 完整输出："北京不是首都。"（模型纠正了问题的错误假设）
+
+- 性能对比
+
+	| 阶段 | Token数 | 前向传播次数 | 耗时 | 特点 |
+	|------|---------|-------------|------|------|
+	| Prefill | 6 | 1次 | ~100ms | 并行，计算密集 |
+	| Decode | 7 | 7次 | ~140ms | 串行，访存密集 |
+
+#### 5.1.4 显存占用公式
+
+-  
+![image](assets/4f62f039c467ff740baa08ee6509dd1427a1ab252f2999b046c53e38648c8e41.png)
+
+- Memory = batch_size × seq_length × hidden_size × layers × 2 × 2
+
+- 说明：序列长度、隐藏维度、层数、KV两个、FP16占2字节
+
+#### 5.1.5 Prefill vs Decode对比总结
+
+| 维度 | Prefill | Decode |
+|------|---------|--------|
+| 处理token数 | N个（整个prompt） | 1个（当前token） |
+| 并行度 | 高（所有token并行） | 低（必须串行） |
+| 瓶颈类型 | 计算密集（Compute-bound） | 访存密集（Memory-bound） |
+| GPU利用率 | 高（~70-80%） | 低（~10-30%） |
+| 显存分配 | 可预分配（prompt长度已知） | 需动态管理（生成长度未知） |
+| 优化重点 | 算子融合、Tensor并行 | KV Cache优化、Continuous Batching |
 
 ### 5.2 KV Cache
 
