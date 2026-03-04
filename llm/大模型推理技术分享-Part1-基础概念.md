@@ -72,6 +72,20 @@ class Attention:
 KV Cache 大小 = 2 × num_layers × seq_len × hidden_size × precision
 ```
 
+**各字段含义**：
+
+| 字段 | 含义 | 说明 |
+|------|------|------|
+| **2** | K（Key）和 V（Value）两个缓存矩阵 | Q 是当前 token 即时计算的无需缓存，K 和 V 必须保留所有历史 token 的结果 |
+| **num_layers** | Transformer 解码层数 | 每层自注意力模块有独立的 K、V 投影权重，不能跨层共享 |
+| **seq_len** | 已生成/处理的 token 序列长度 | 自回归生成时每个新 token 需与所有历史 token 做注意力计算，缓存量随序列长度线性增长 |
+| **hidden_size** | 隐藏层维度（K/V 向量维度） | 多头注意力中各头维度拼接后等于 hidden_size，决定单 token 单层缓存的"宽度" |
+| **precision** | 每个参数占用的字节数 | FP16 = 2 bytes，FP32 = 4 bytes |
+
+**公式推导**：自注意力中 Q 与 K 点积得到注意力权重，再与 V 加权求和得到输出。为了让新 token "看到"之前的上下文，必须缓存每一层、每个历史 token 位置的 K 和 V 向量，最后乘以精度得到实际字节数。
+
+> **注意**：如果模型使用了 GQA（Grouped-Query Attention）或 MQA（Multi-Query Attention），K/V 的 head 数少于 Q 的 head 数，此时 `hidden_size` 应替换为 `num_kv_heads × head_dim`，KV Cache 会相应减小。详见下方 [1.3.1 注意力变体](#131-注意力变体mha--mqa--gqa)。
+
 **示例**：Llama-2-7B
 - num_layers = 32
 - hidden_size = 4096
@@ -88,6 +102,72 @@ KV Cache = 2 × 32 × 2048 × 4096 × 2 bytes
 - 单个请求就需要 1GB 显存
 - A100 (80GB) 理论上只能并发 80 个请求
 - 实际更少（模型权重、激活值也需要显存）
+
+#### 1.3.1 注意力变体：MHA → MQA → GQA
+
+标准多头注意力（MHA）的 KV Cache 开销巨大，MQA 和 GQA 通过减少 K/V head 数来降低缓存量。
+
+**MHA（Multi-Head Attention）**：原始 Transformer 设计，Q、K、V 各有 `num_heads` 个头。
+
+```
+Q heads:  [H1] [H2] [H3] [H4] [H5] [H6] [H7] [H8]
+K heads:  [H1] [H2] [H3] [H4] [H5] [H6] [H7] [H8]
+V heads:  [H1] [H2] [H3] [H4] [H5] [H6] [H7] [H8]
+```
+
+- 每个 Q head 与对应的 K、V head 做注意力计算
+- KV Cache = `2 × num_layers × seq_len × num_heads × head_dim × precision`
+
+**MQA（Multi-Query Attention）**：所有 Q head 共享同一组 K 和 V。
+
+> 论文：*Fast Transformer Decoding: One Write-Head is All You Need*（Shazeer, 2019）
+
+```
+Q heads:  [H1] [H2] [H3] [H4] [H5] [H6] [H7] [H8]
+K heads:  [          --------共享 1 个--------          ]
+V heads:  [          --------共享 1 个--------          ]
+```
+
+- K、V 只有 1 个头，KV Cache 缩减为原来的 **1/num_heads**
+- 优点：KV Cache 大幅减小，推理速度显著提升
+- 缺点：表达能力下降，模型质量有一定损失
+- 代表模型：PaLM、StarCoder、Falcon-40B
+
+**GQA（Grouped-Query Attention）**：将 Q heads 分组，每组共享一份 K、V。
+
+> 论文：*GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints*（Ainslie et al., 2023）
+
+```
+假设 num_heads=8，num_kv_heads=2（每 4 个 Q head 一组）
+
+Q heads:  [H1] [H2] [H3] [H4] | [H5] [H6] [H7] [H8]
+K heads:  [   共享 K1         ] | [   共享 K2         ]
+V heads:  [   共享 V1         ] | [   共享 V2         ]
+```
+
+- KV Cache = `2 × num_layers × seq_len × num_kv_heads × head_dim × precision`
+- 代表模型：Llama-2-70B（num_kv_heads=8）、Llama-3、Mistral-7B
+
+**GQA 是 MHA 和 MQA 的统一框架**：
+
+| 配置 | num_kv_heads | 等价于 |
+|------|-------------|--------|
+| `num_kv_heads = num_heads` | 如 32 | **MHA** |
+| `1 < num_kv_heads < num_heads` | 如 8 | **GQA** |
+| `num_kv_heads = 1` | 1 | **MQA** |
+
+**KV Cache 节省对比**（Llama-2 系列，num_heads=32, head_dim=128, 32层, seq_len=2048, FP16）：
+
+| 注意力类型 | num_kv_heads | KV Cache / 请求 | 节省比例 |
+|-----------|-------------|-----------------|---------|
+| MHA | 32 | 1 GB | 基准 |
+| GQA | 8 | 0.25 GB | 75% |
+| MQA | 1 | ~0.03 GB | 96.9% |
+
+**选择策略**：
+- 追求极致质量 → MHA
+- 平衡质量与效率（当前主流）→ **GQA**
+- 对延迟极度敏感 → MQA
 
 ### 1.4 KV Cache 管理策略
 
@@ -163,31 +243,54 @@ class RadixCache:
         self.root = TreeNode()
     
     def match_prefix(self, token_ids):
-        """匹配最长公共前缀"""
-        node = self.root
-        matched_len = 0
+        """匹配最长公共前缀，返回匹配长度和最后匹配到的节点"""
+        node = self.root       # 从根节点开始遍历
+        matched_len = 0        # 已匹配的前缀长度
         
         for i, token_id in enumerate(token_ids):
             if token_id in node.children:
+                # 当前 token 在树中存在，沿子节点继续向下匹配
                 node = node.children[token_id]
-                matched_len = i + 1
+                matched_len = i + 1  # i 从 0 开始，实际长度需 +1
             else:
+                # KV Cache 必须从头连续才能复用，一旦断开后续无意义
                 break
         
+        # matched_len: 可复用的 KV Cache token 数
+        # node: 最后匹配节点，供 insert 从此处继续插入后缀
         return matched_len, node
     
     def insert(self, token_ids, kv_data):
-        """插入新的 KV Cache"""
+        """插入新的 KV Cache，复用已有前缀，只插入不匹配的后缀部分"""
+        # 先查找已有前缀的匹配长度和终止节点
         matched_len, node = self.match_prefix(token_ids)
         
-        # 插入新节点
+        # 从匹配终止位置开始，逐个插入剩余 token 作为新子节点
         for token_id in token_ids[matched_len:]:
             new_node = TreeNode(token_id)
             node.children[token_id] = new_node
-            node = new_node
+            node = new_node  # 移动到新节点，为下一个 token 做准备
         
+        # 在最后一个节点上存储对应的 KV Cache 数据
         node.kv_data = kv_data
 ```
+
+**`match_prefix` 核心逻辑解析**：
+
+该方法从根节点出发，逐个遍历输入 `token_ids`，沿前缀树向下查找最长连续匹配：
+
+```
+树中已有:  [Translate] → [to] → [French] → [:] → [Hello]
+新请求:    [Translate] → [to] → [French] → [:] → [Goodbye]
+                                              ↑
+                                        匹配到这里断开，matched_len = 4
+```
+
+- **从根开始**：`node = self.root`，每步检查当前 token 是否在 `node.children` 中
+- **匹配成功**：走到子节点，`matched_len = i + 1`（i 从 0 开始故 +1）
+- **匹配失败**：`break` 终止。因为 KV Cache 必须从头连续才能复用，中间断开后续匹配无意义
+- **返回 `(matched_len, node)`**：匹配长度用于确定可复用的 KV Cache 范围；返回的节点供 `insert` 方法从该位置继续插入不匹配的后缀，避免从根重新遍历
+- **时间复杂度**：O(n)，n 为输入序列长度
 
 ### 1.5 对比总结
 
@@ -272,8 +375,8 @@ FLOPs = 2 × seq_len × hidden_size × num_layers
 ```
 
 **优势**：
-- Prefill: 使用高算力 GPU（H100），快速处理长上下文
-- Decode: 使用高内存 GPU（A100），支持大批量并发
+- Prefill: 使用高算力 GPU（H100），快速处理长上下文（Compute-bound）
+- Decode: 使用高性价比 GPU（A100/A10），大显存支持大批量并发（Memory-bound，无需极高算力）
 - 资源利用率提升 30-50%
 
 **SGLang 实现**：
