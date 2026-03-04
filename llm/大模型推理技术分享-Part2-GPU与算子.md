@@ -124,7 +124,107 @@ SM (每个)
 └─────────────────────────────────────────────────────┘
 ```
 
-### 2.2 内存带宽的重要性
+### 2.2 HBM 详解
+
+**HBM（High Bandwidth Memory，高带宽内存）** 是一种专为高性能计算设计的 DRAM 内存技术，是现代 AI 加速器（如 NVIDIA GPU）中显存的主体。
+
+#### 为什么需要 HBM？
+
+传统的 GDDR 内存通过 PCB 走线与 GPU 芯片连接，引脚数量和频率受限，带宽增长遇到瓶颈。而大模型推理（尤其是 Decode 阶段）对内存带宽极度敏感——每生成一个 token 都需要从显存中读取大量的模型权重和 KV Cache 数据，带宽不够意味着 GPU 算力"喂不饱"。
+
+#### HBM 核心架构
+
+HBM 采用 **3D 堆叠 + 硅中介层（Silicon Interposer）** 的封装方式：
+
+```
+         ┌──────────────┐
+         │   GPU Die    │  ← GPU 计算芯片
+         └──────┬───────┘
+                │  (硅中介层 Silicon Interposer，超短互联)
+    ┌───────────┼───────────┐
+    │           │           │
+┌───┴───┐  ┌───┴───┐  ┌───┴───┐
+│ DRAM  │  │ DRAM  │  │ DRAM  │  ← 多个 DRAM Die 垂直堆叠
+│ DRAM  │  │ DRAM  │  │ DRAM  │
+│ DRAM  │  │ DRAM  │  │ DRAM  │
+│ DRAM  │  │ DRAM  │  │ DRAM  │
+│ Logic │  │ Logic │  │ Logic │  ← 底层逻辑 Die（控制器）
+└───────┘  └───────┘  └───────┘
+  Stack 1    Stack 2    Stack 3   ← 多个 HBM Stack
+```
+
+**关键技术点**：
+
+| 特性 | 说明 |
+|------|------|
+| **3D 堆叠** | 多层 DRAM Die 通过 TSV（硅通孔，Through-Silicon Via）垂直堆叠，通常 4-12 层 |
+| **硅中介层** | GPU 和 HBM Stack 封装在同一块硅中介层上，互联距离极短（毫米级），延迟低、功耗小 |
+| **超宽总线** | 每个 Stack 有 1024-bit 位宽的数据总线（对比 GDDR6 只有 32-bit/通道） |
+| **多通道并行** | 多个 HBM Stack 并行工作，总带宽叠加 |
+
+#### HBM 各代演进
+
+| 世代 | 单 Stack 带宽 | 单 Stack 容量 | 堆叠层数 | 代表 GPU |
+|------|-------------|-------------|---------|---------|
+| **HBM** | 128 GB/s | 1 GB | 4 层 | — |
+| **HBM2** | 256 GB/s | 8 GB | 8 层 | V100 (4×HBM2 = 900 GB/s) |
+| **HBM2e** | 410 GB/s | 16 GB | 8 层 | A100 (5×HBM2e ≈ 2 TB/s) |
+| **HBM3** | 600+ GB/s | 16 GB | 8-12 层 | H100 (5×HBM3 ≈ 3.35 TB/s) |
+| **HBM3e** | 1+ TB/s | 36 GB | 12 层 | H200 (6×HBM3e ≈ 4.8 TB/s) |
+
+#### HBM 在 GPU 内存层次中的位置
+
+HBM 是 GPU 内存体系中的 **片外大容量存储**，参见上方 [2.1 内存层次](#21-内存层次) 的层次图：
+
+```
+速度快 ← ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ → 容量大
+
+Registers (~KB, ~1 cycle)
+  → SRAM / Shared Memory (~192KB/SM, ~20 cycles)  ← FlashAttention 分块数据加载到这里
+    → L2 Cache (~40 MB, ~200 cycles)
+      → HBM (~40-80 GB, ~300-400 cycles)  ★ 模型权重、KV Cache、激活值都存在这里
+```
+
+#### HBM 与大模型推理的关系
+
+在 Decode 阶段，每生成一个 token：
+- 需要读取 **全部模型权重**（如 70B 模型 ≈ 140 GB）
+- 需要读取 **该请求的全部 KV Cache**（可能 1 GB+）
+- 但实际计算量很小（只是一个 token 的矩阵-向量乘法）
+
+```
+Decode 阶段的算术强度（Arithmetic Intensity）:
+
+   计算量       2 × 模型参数量           很小的数
+  ─────── = ────────────────────── = ──────────── → 极低
+  访存量     模型参数量 + KV Cache     很大的数
+```
+
+这意味着 **GPU 的计算单元在等待 HBM 传输数据**，算力利用率很低。此时性能完全取决于 HBM 的带宽：
+
+| GPU | HBM 带宽 | Decode 理论极限 (7B, FP16) |
+|-----|---------|--------------------------|
+| A100 | 2 TB/s | ~143 tokens/s |
+| H100 | 3.35 TB/s | ~239 tokens/s |
+| H200 | 4.8 TB/s | ~343 tokens/s |
+
+> 计算方式：`HBM带宽 / (模型大小 × 2 bytes)` ≈ 每秒能完成的 Decode 步数
+
+这就是为什么以下优化技术都在直接或间接地解决 HBM 带宽瓶颈：
+1. **FlashAttention**：分块计算减少 HBM 访问次数
+2. **量化**（INT8/INT4）：缩小模型和 KV Cache 体积，减轻带宽压力
+3. **推测解码**：一次读取验证多个 token，提高每次 HBM 访问的产出
+4. **GQA/MQA**：减少 KV Head 数来缩小 KV Cache，减少 HBM 读取量
+
+#### 总结
+
+**HBM 是 GPU 的"主内存"**，它决定了：
+- **容量**：能装多大的模型、能并发多少请求（KV Cache 容量）
+- **带宽**：Decode 阶段的生成速度上限
+
+在大模型推理中，**HBM 带宽是 Decode 阶段最核心的性能瓶颈**。
+
+### 2.3 内存带宽的重要性
 
 **Decode 阶段的瓶颈**：
 ```python
@@ -158,7 +258,7 @@ GPU 利用率 = 2 / 312 = 0.6%
 
 **结论**：Decode 阶段是 **Memory-bound**，优化重点是减少内存访问。
 
-### 2.3 内存访问模式
+### 2.4 内存访问模式
 
 **Coalesced Access（合并访问）**：
 ```
@@ -721,7 +821,8 @@ prof.export_chrome_trace("trace.json")
 
 2. **内存层次**：
    - Registers > Shared Memory > L2 Cache > HBM
-   - Decode 阶段是 Memory-bound
+   - HBM：3D 堆叠 + 硅中介层，高带宽（2-4.8 TB/s），是 GPU 显存主体
+   - Decode 阶段是 Memory-bound，HBM 带宽是生成速度上限
    - 优化重点：减少 HBM 访问
 
 3. **CUDA 编程**：
