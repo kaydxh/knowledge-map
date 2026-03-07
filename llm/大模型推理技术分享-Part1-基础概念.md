@@ -56,6 +56,9 @@ class Attention:
         all_V = [self.kv_cache[i][1] for i in range(position + 1)]
         
         # 计算 attention
+        # concat: 将缓存中零散的 K/V 向量列表拼接成完整矩阵
+        # 例如 concat([K₀, K₁, K₂]) → 形状 [n+1, hidden] 的矩阵
+        # 矩阵乘法 Q @ K.T 要求 K 是二维矩阵，所以必须先 concat
         scores = Q @ concat(all_K).T
         attn = softmax(scores) @ concat(all_V)
         return attn
@@ -360,6 +363,88 @@ FLOPs = 2 × seq_len × hidden_size × num_layers
 - GPU 利用率低（<20%）
 - 瓶颈：**内存带宽**（从 HBM 读取 KV Cache）
 
+### 2.3.1 前向传播与后向传播
+
+**前向传播（Forward Propagation）** 和 **后向传播（Backward Propagation）** 是深度学习中最基本的两个计算过程：
+
+| 维度 | 前向传播（Forward） | 后向传播（Backward） |
+|------|------|------|
+| **方向** | 输入 → 输出（从第一层到最后一层） | 输出 → 输入（从最后一层到第一层） |
+| **目的** | 计算预测值（logits）并得到损失（loss） | 计算每个参数的梯度（∂Loss/∂W），用于更新权重 |
+| **核心操作** | 矩阵乘法、激活函数、注意力计算 | 链式法则（Chain Rule）逐层反向求导 |
+| **计算量** | 约 2 × params × tokens FLOPs | 约 4 × params × tokens FLOPs（约为前向的 2 倍） |
+| **内存需求** | 需存储每层的中间激活值（用于反向传播） | 需要前向传播保存的中间结果 + 梯度存储 |
+| **使用场景** | 推理（仅前向传播）和训练 | 仅训练阶段 |
+
+**直觉理解**：
+- **前向传播**：像考试答题——从题目（输入）出发，经过思考（中间层计算），写下答案（输出）
+- **后向传播**：像对答案——知道正确答案后，**反向追溯**每一步哪里出了错（梯度），然后针对性改进（更新权重）
+
+**与推理的关系**：
+- **推理（Inference）只需要前向传播**，不需要后向传播，所以推理的计算量约为训练的 1/3
+- FlashAttention 的重计算策略（不存储中间注意力矩阵，反向时重新前向计算）本质上是用前向传播的 FLOPs 换内存空间
+- 推测解码中的「大模型验证」本质上是一次前向传播，把 k 个候选 token 一次性并行前向传播验证，比 k 次串行前向传播快得多
+- 数据并行（DP）训练时，后向传播完成后需通过 All-Reduce 同步各 GPU 的梯度，然后统一更新参数
+
+### 2.3.2 计算量公式：2 × params × tokens
+
+**公式来源**：Transformer 模型中，绝大部分计算量来自线性层（矩阵乘法）。
+
+> **基本事实**：矩阵乘法 `Y = X @ W`，X 形状 `[m, k]`，W 形状 `[k, n]`，FLOPs = `2 × m × k × n`
+> 为什么是 2？对于输出矩阵 Y 中的每个元素，需要 k 次乘法 + k-1 次加法，近似为 2k 次浮点操作。
+
+**推导过程**：
+
+单个 token 通过一个线性层 `W: [hidden, hidden]` 的计算量：
+```
+FLOPs = 2 × hidden × hidden = 2 × hidden²
+```
+
+由于模型所有线性层的参数量之和 ≈ 总参数量（Embedding、LayerNorm 等占比极小）：
+```
+单个 token 前向传播 FLOPs = Σ(2 × 每层参数量) = 2 × 总参数量 = 2 × params
+处理 tokens 个 token：总 FLOPs = 2 × params × tokens
+```
+
+**Llama-2-7B 线性层拆解**：
+
+| 线性层 | 权重形状 | 参数量 | 单 token FLOPs |
+|---|---|---|---|
+| Q 投影 `W_q` | [4096, 4096] | 16.8M | 2 × 16.8M |
+| K 投影 `W_k` | [4096, 4096] | 16.8M | 2 × 16.8M |
+| V 投影 `W_v` | [4096, 4096] | 16.8M | 2 × 16.8M |
+| 输出投影 `W_o` | [4096, 4096] | 16.8M | 2 × 16.8M |
+| FFN up `W_up` | [4096, 11008] | 45.1M | 2 × 45.1M |
+| FFN gate `W_gate` | [4096, 11008] | 45.1M | 2 × 45.1M |
+| FFN down `W_down` | [11008, 4096] | 45.1M | 2 × 45.1M |
+| **每层合计** | | **~201.3M** | **2 × 201.3M** |
+
+> 32 层线性层参数量 = 32 × 201.3M ≈ 6.44B，加上 Embedding + LM Head + LayerNorm ≈ 0.56B，总参数量 ≈ 7B
+
+**7B 模型计算量示例**：
+
+| 场景 | tokens | 计算公式 | FLOPs |
+|---|---|---|---|
+| Decode 单步 | 1 | 2 × 7B × 1 | **14 GFLOPs** |
+| Prefill 100 tokens | 100 | 2 × 7B × 100 | **1.4 TFLOPs** |
+| Prefill 2048 tokens | 2048 | 2 × 7B × 2048 | **28.7 TFLOPs** |
+| 生成 512 tokens（含 prefill 2048） | 2560 | 2 × 7B × 2560 | **35.8 TFLOPs** |
+| 训练（前向+后向，约 3 倍前向） | 2048 | 6 × 7B × 2048 | **86.0 TFLOPs** |
+
+> 训练总 FLOPs ≈ **6 × params × tokens**（前向 2 + 后向 4）
+
+**结合 GPU 算力估算耗时**（以 A100 312 TFLOPS FP16）：
+```
+Prefill 2048 tokens:
+  FLOPs = 28.7 TFLOPs → 理论 28.7/312 ≈ 92ms，实际 ~50% 利用率 ≈ 184ms
+
+Decode 1 token:
+  FLOPs = 14 GFLOPs = 0.014 TFLOPs → 理论 0.045ms
+  但实际受限于内存带宽：读取 14GB 权重 / 2TB/s ≈ 7ms（Memory-Bound）
+```
+
+> 这印证了 Decode 阶段 GPU 利用率低（<20%）——计算量太小（14 GFLOPs），瓶颈在于从 HBM 读取模型权重。
+
 ### 2.4 Prefill-Decode 分离（PD Disaggregation）
 
 **核心思想**：将 Prefill 和 Decode 分离到不同的 GPU 集群
@@ -434,68 +519,316 @@ Batch:
 
 ## 3. FlashAttention：内存高效的注意力机制
 
-### 3.1 标准 Attention 的问题
+> 论文：*FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*（Dao et al., 2022）
+
+### 3.1 标准 Attention 的瓶颈
+
+#### 3.1.1 GPU 内存层级
+
+理解 FlashAttention 首先需要了解 GPU 的内存层级结构：
+
+```
+┌──────────────────────────────────────────────────────┐
+│  HBM (显存 / High Bandwidth Memory)                    │
+│  容量大: 40GB~80GB                                     │
+│  带宽高: ~2TB/s (A100)                                 │
+│  但相对 SRAM 仍然慢                                    │
+│                                                       │
+│  ┌─────────────────────────────────────────────┐      │
+│  │  SRAM (片上缓存 / Shared Memory)              │      │
+│  │  容量小: 每个 SM ~192KB (A100), 总共 ~20MB     │      │
+│  │  速度极快: ~19TB/s                             │      │
+│  └─────────────────────────────────────────────┘      │
+└──────────────────────────────────────────────────────┘
+```
+
+**核心矛盾**：SRAM 速度快但容量极小，HBM 容量大但速度慢。
+
+#### 3.1.2 标准 Attention 的内存问题
 
 **标准实现**：
 ```python
 def standard_attention(Q, K, V):
     # Q, K, V: [batch, seq_len, hidden_dim]
     
-    # 1. 计算 attention scores
-    scores = Q @ K.T  # [batch, seq_len, seq_len]
-    
-    # 2. Softmax
-    attn_weights = softmax(scores)  # [batch, seq_len, seq_len]
-    
-    # 3. 加权求和
-    output = attn_weights @ V  # [batch, seq_len, hidden_dim]
-    
+    scores = Q @ K.T           # ① 需要写入 HBM: [seq_len, seq_len]
+    attn_weights = softmax(scores)  # ② 从 HBM 读出 scores，写回 HBM
+    output = attn_weights @ V       # ③ 从 HBM 读出 attn_weights
     return output
 ```
 
-**问题**：
-- `scores` 和 `attn_weights` 需要存储：O(seq_len²) 内存
-- seq_len = 2048: 需要 2048² × 4 bytes = 16 MB（单个 head）
-- 32 个 heads: 512 MB
-- **内存瓶颈**：限制了 batch size 和 seq_len
+**问题**：`scores` 和 `attn_weights` 这两个巨大的矩阵（O(seq_len²)）需要**反复在 HBM 中读写**：
 
-### 3.2 FlashAttention 原理
-
-**核心思想**：
-1. **分块计算**（Tiling）：将 Q, K, V 分块加载到 SRAM
-2. **在线 Softmax**：不存储完整的 attention matrix
-3. **重计算**：反向传播时重新计算，而不是存储
-
-**算法流程**：
 ```
-1. 将 Q 分为 [Q₁, Q₂, ..., Qₘ]
-2. 将 K, V 分为 [K₁, V₁], [K₂, V₂], ..., [Kₙ, Vₙ]
-
-3. For each Qᵢ:
-     For each (Kⱼ, Vⱼ):
-         a. 加载 Qᵢ, Kⱼ, Vⱼ 到 SRAM
-         b. 计算 Sᵢⱼ = Qᵢ @ Kⱼ.T
-         c. 在线更新 Softmax 和输出
-         d. 丢弃 Sᵢⱼ（不存储）
+           HBM                          GPU 计算核心 (SRAM)
+    ┌──────────────┐                 ┌──────────────────┐
+    │              │   ← 读取 Q,K →  │ 计算 scores      │
+    │  存储 scores │   ← 写回 →      │                  │
+    │              │   ← 读取 →      │ 计算 softmax     │
+    │  存储 attn   │   ← 写回 →      │                  │
+    │              │   ← 读取 →      │ 计算 output      │
+    └──────────────┘                 └──────────────────┘
+    
+    总共 HBM 读写次数: O(seq_len²) × 多次
+    ↑ 这是性能瓶颈！（Memory-Bound）
 ```
 
-**内存优化**：
-- 标准 Attention: O(seq_len²) HBM 访问
-- FlashAttention: O(seq_len²/block_size) HBM 访问
-- **加速 2-4x**，内存减少 10-20x
+**内存开销示例**：
+- seq_len = 2048, 32 heads → scores + attn_weights 合计 **~1GB HBM 读写**
+- seq_len = 8192 → 膨胀 16 倍 → **~16GB HBM 读写**
+
+**结论：标准 Attention 是典型的 Memory-Bound 操作，计算量不大但 HBM 读写量巨大。**
+
+### 3.2 FlashAttention 核心原理
+
+FlashAttention 的核心目标是：**减少 HBM 读写次数，把计算尽量留在 SRAM 中完成**。
+
+#### 3.2.1 三大核心技术
+
+##### ① 分块计算（Tiling）
+
+**思想**：既然整个 `[seq_len, seq_len]` 的 attention 矩阵放不进 SRAM，那就分块放！
+
+```
+Q 分为 m 块: [Q₁, Q₂, ..., Qₘ]     每块大小: [block_size_q, head_dim]
+K 分为 n 块: [K₁, K₂, ..., Kₙ]     每块大小: [block_size_k, head_dim]
+V 分为 n 块: [V₁, V₂, ..., Vₙ]     每块大小: [block_size_k, head_dim]
+
+每次只计算一个子块的 attention score:
+Sᵢⱼ = Qᵢ @ Kⱼ.T   大小: [block_size_q, block_size_k]  ← 能放进 SRAM！
+```
+
+```
+    完整的 Attention 矩阵 [seq_len × seq_len]
+    ┌────┬────┬────┬────┐
+    │S₁₁ │S₁₂ │S₁₃ │S₁₄ │  ← Q₁ 与所有 K 块
+    ├────┼────┼────┼────┤
+    │S₂₁ │S₂₂ │S₂₃ │S₂₄ │  ← Q₂ 与所有 K 块
+    ├────┼────┼────┼────┤
+    │S₃₁ │S₃₂ │S₃₃ │S₃₄ │  ← Q₃ 与所有 K 块
+    ├────┼────┼────┼────┤
+    │S₄₁ │S₄₂ │S₄₃ │S₄₄ │  ← Q₄ 与所有 K 块
+    └────┴────┴────┴────┘
+    
+    FlashAttention: 一次只算一小块 Sᵢⱼ，在 SRAM 内完成，
+    用完即丢，不写回 HBM！
+```
+
+##### ② 在线 Softmax（Online Softmax）
+
+**这是 FlashAttention 最精妙的部分。**
+
+标准 Softmax 的问题：必须看到**整行**的所有 scores 才能计算（因为需要全局 max 和 sum）：
+
+```
+softmax(xᵢ) = exp(xᵢ - max(x)) / Σⱼ exp(xⱼ - max(x))
+                     ↑ 需要全局 max    ↑ 需要全局 sum
+```
+
+如果分块计算，只能看到部分 scores，怎么做 Softmax？
+
+**解决方案：递增式更新（Online Softmax Algorithm）**
+
+```python
+# 伪代码：在线 Softmax + 输出累积
+def flash_attention_one_row(Qᵢ, K_blocks, V_blocks):
+    """计算 Q 的第 i 块对应的输出"""
+    m_prev = -inf      # 当前已知的最大值
+    l_prev = 0         # 当前已知的 exp sum
+    O_prev = 0         # 当前的输出累积
+    
+    for j in range(n_blocks):
+        # 1. 在 SRAM 中计算子块 score
+        Sᵢⱼ = Qᵢ @ Kⱼ.T                    # [block_q, block_k]
+        
+        # 2. 局部 max
+        m_cur = max(m_prev, max(Sᵢⱼ))       # 更新全局 max
+        
+        # 3. 修正之前的 exp sum（因为 max 变了）
+        l_prev_corrected = l_prev * exp(m_prev - m_cur)
+        
+        # 4. 当前块的 exp sum
+        P_cur = exp(Sᵢⱼ - m_cur)            # 局部 softmax 分子
+        l_cur = l_prev_corrected + sum(P_cur)
+        
+        # 5. 修正之前的输出累积 + 加上当前块的贡献
+        O_prev = O_prev * (l_prev * exp(m_prev - m_cur) / l_cur) \
+               + P_cur @ Vⱼ / l_cur
+        
+        # 6. 更新状态
+        m_prev = m_cur
+        l_prev = l_cur
+    
+    return O_prev  # 最终结果与标准 Attention 完全一致！
+```
+
+**关键点**：每处理一个新的 K/V 块，都通过 `exp(m_prev - m_cur)` 这个修正因子来调整之前的结果。最终结果是**数学上精确**的，不是近似！
+
+> **编程范式类比**：Online Softmax 的递增式更新属于经典的 **"单次遍历 + 有限状态 + 迭代更新"** 范式，类似于 Welford 在线均值算法、Kadane 最大子数组和算法等。每来一个新数据块，通过数学递推关系修正历史累积结果，最终在 O(1) 额外空间下得到精确全局结果。
+
+##### ③ 重计算（Recomputation）
+
+训练时需要反向传播，标准做法是前向时保存 `attn_weights` 用于反向。但 FlashAttention 的做法是：
+
+- **前向传播**：只保存输出 O 和两个标量（m, l）
+- **反向传播**：重新从 HBM 读取 Q, K, V，重新分块计算 attention（用 m, l 辅助）
+- **代价**：多了一次前向计算的 FLOPS
+- **收益**：省下了 O(seq_len²) 的 HBM 存储
+
+> 这在推理场景中不涉及，但体现了 FlashAttention "**用计算换内存**"的核心哲学。
+
+#### 3.2.2 完整算法流程图
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    FlashAttention 完整流程                │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  HBM 中存储: Q, K, V, O (输出)                          │
+│  SRAM 中: 临时块 Qᵢ, Kⱼ, Vⱼ, Sᵢⱼ, Pᵢⱼ, Oᵢ           │
+│                                                         │
+│  for i = 1 to m (Q 的块数):                             │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │  从 HBM 加载 Qᵢ → SRAM                          │    │
+│  │  初始化: mᵢ = -∞, lᵢ = 0, Oᵢ = 0               │    │
+│  │                                                   │    │
+│  │  for j = 1 to n (K/V 的块数):                     │    │
+│  │  ┌───────────────────────────────────────────┐    │    │
+│  │  │  ① 从 HBM 加载 Kⱼ, Vⱼ → SRAM             │    │    │
+│  │  │  ② Sᵢⱼ = Qᵢ @ Kⱼ.T      (在 SRAM 中)    │    │    │
+│  │  │  ③ 更新 mᵢ, lᵢ（在线 Softmax）            │    │    │
+│  │  │  ④ Oᵢ += 修正后的 softmax(Sᵢⱼ) @ Vⱼ      │    │    │
+│  │  │  ⑤ 丢弃 Sᵢⱼ（不写回 HBM！）              │    │    │
+│  │  └───────────────────────────────────────────┘    │    │
+│  │                                                   │    │
+│  │  写回 Oᵢ → HBM                                   │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 3.2.3 HBM 读写量对比
+
+| 方案 | HBM 读写量 | 说明 |
+|---|---|---|
+| **标准 Attention** | O(N² + Nd) | 需要读写完整的 N×N attention 矩阵 |
+| **FlashAttention** | O(N²d / M) | M 是 SRAM 大小，d 是 head_dim |
+
+其中 N = seq_len, d = head_dim, M = SRAM 大小。
+
+**直观理解**：
+- 标准方式：每个 score 读写 1 次 HBM → 总共 N² 次
+- FlashAttention：每次加载一个 SRAM 大小的块，在 SRAM 内完成所有计算 → 减少了约 M/d 倍的 HBM 访问
+
+以 A100 为例（SRAM ≈ 20MB, d = 128）：
+- 减少 HBM 读写约 **~100 倍**
 
 ### 3.3 FlashAttention-2 改进
 
-**优化点**：
-1. **更好的并行化**：减少非矩阵乘法操作
-2. **Work Partitioning**：优化 warp 级别的调度
-3. **减少共享内存读写**
+> 论文：*FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning*（Dao, 2023）
 
-**性能提升**：
-- 相比 FlashAttention-1: 加速 1.5-2x
-- 相比标准 Attention: 加速 3-8x
+#### 3.3.1 Matmul vs 非 Matmul 操作
+
+理解 FlashAttention-2 的优化，首先需要区分 GPU 上两类操作的性能差异：
+
+| 操作类型 | 示例 | 硬件单元 | 吞吐量 |
+|---|---|---|---|
+| **Matmul（矩阵乘法）** | `Q @ K.T`、`Attention @ V`、线性层 | **Tensor Core**（专用矩阵计算单元） | 极高（A100: 312 TFLOPS FP16） |
+| **非 Matmul** | softmax、mask、dropout、缩放(scale)、逐元素操作 | **CUDA Core**（通用计算单元） | 较低（A100: ~19.5 TFLOPS FP32） |
+
+性能差距可达 **16 倍** 甚至更多！Matmul 即 **Matrix Multiplication（矩阵乘法）** 的缩写。
+
+**在 Attention 中的体现**：
+
+```
+✅ Matmul 操作（高效，Tensor Core）：
+   S = Q @ K.T          ← 矩阵乘法
+   O = P @ V            ← 矩阵乘法
+
+❌ 非 Matmul 操作（低效，CUDA Core）：
+   S = S / √d           ← 逐元素缩放（scale）
+   S = S + mask          ← 逐元素加法（masking）
+   P = softmax(S)        ← 逐行归一化（softmax）
+   P = dropout(P)        ← 随机置零（dropout）
+   m_new = max(m_old, m_cur)  ← 取最大值
+   l_new = exp(m_old - m_new) * l_old + ...  ← 指数运算 + 累加
+```
+
+#### 3.3.2 三大优化点
+
+##### 1. 减少非 Matmul 操作（延迟 Rescaling）
+
+FlashAttention-1 在 Online Softmax 的递推过程中，每个块都要做两次 rescaling：
+
+```python
+# FlashAttention-1：每个块都要做两次 rescaling
+O_new = diag(l_prev/l_new) @ O_prev + diag(1/l_new) @ exp(S - m_new) @ V
+#       ^^^^^^^^^^^^^^^^^^^^^^^^        ^^^^^^^^^^^^^^^^^^
+#       对旧输出做缩放（非matmul）        对新结果做缩放（非matmul）
+```
+
+FlashAttention-2 的策略是**延迟 rescaling**：
+
+```python
+# FlashAttention-2：只在最后统一做一次 rescaling
+# 循环内：
+O = diag(exp(m_old - m_new)) @ O + exp(S - m_new) @ V  # ← 仅用 exp，不除 l
+
+# 循环结束后：
+O = diag(1/l) @ O   # ← 最后才统一除以 l，只做一次！
+```
+
+这样让 Tensor Core 做矩阵乘法的时间占比更高。
+
+##### 2. 优化 Warp 级别并行（交换循环顺序）
+
+```
+FA-1: for Kⱼ → for Qᵢ  (需要在不同 warp 间同步 Oᵢ)
+FA-2: for Qᵢ → for Kⱼ  (每个 warp 独立完成一个 Qᵢ 的全部计算)
+```
+
+- FA-1：外层循环遍历 K/V 块，内层遍历 Q 块
+- FA-2：**交换了循环顺序**，外层遍历 Q 块，内层遍历 K/V 块
+- 好处：每个 warp 负责一个 Q 块的完整计算，减少 warp 间的通信和同步
+
+##### 3. 减少共享内存读写
+
+- 更好的寄存器和共享内存分配策略
+- 减少不必要的数据搬运
+
+#### 3.3.3 性能提升
+
+**最终效果**：FA-2 在 A100 上能达到理论 FLOPS 的 **~70%**（FA-1 约 35%），性能翻倍。
+
+- 相比 FlashAttention-1: 加速 **1.5-2x**
+- 相比标准 Attention: 加速 **3-8x**
+
+> **一句话总结**：FlashAttention-2 的核心策略是——**让 GPU 把更多时间花在它最擅长的矩阵乘法（Tensor Core）上，减少低效的非 Matmul 操作（CUDA Core）的占比**。
 
 ### 3.4 FlashAttention 在推理中的应用
+
+FlashAttention 已深度集成到主流推理框架中：
+
+```mermaid
+graph TB
+    subgraph 推理框架
+        A[vLLM] --> C[FlashAttention Kernel]
+        B[SGLang] --> C
+    end
+    
+    subgraph FlashAttention Kernel
+        C --> D[Prefill: 标准 FlashAttention]
+        C --> E[Decode: FlashDecoding]
+    end
+    
+    subgraph KV Cache
+        D --> F[PagedAttention / RadixAttention]
+        E --> F
+    end
+```
+
+- **Prefill 阶段**：完整的 FlashAttention（Q、K、V 都是完整序列）
+- **Decode 阶段**：FlashDecoding（Q 只有 1 个 token，K/V 从 Cache 读取）
 
 **vLLM 集成**：
 ```python
@@ -527,6 +860,19 @@ class RadixAttentionWithFlash:
         )
         return output
 ```
+
+### 3.5 总结对比
+
+| 特性 | 标准 Attention | FlashAttention-1 | FlashAttention-2 |
+|---|---|---|---|
+| HBM 读写 | O(N²) | O(N²d/M) | O(N²d/M) |
+| 额外内存 | O(N²) | O(N) | O(N) |
+| 计算结果 | 精确 | **精确**（非近似） | **精确** |
+| GPU 利用率 | ~15% | ~35% | **~70%** |
+| seq_len=2K 加速 | 1x | 2-4x | **3-5x** |
+| seq_len=16K 加速 | 1x | 5-10x | **7-15x** |
+
+**一句话总结**：FlashAttention 的本质是一种 **IO-Aware（IO 感知）** 的算法优化——通过分块计算 + 在线 Softmax，将 attention 计算从 Memory-Bound 转变为 Compute-Bound，大幅减少 HBM 读写，同时保持数学上的精确性。
 
 ---
 
@@ -626,10 +972,35 @@ class Scheduler:
 - 按到达顺序调度
 - 公平性好，但效率不一定最优
 
-**LPF (Longest-Prefix-First)**：
-- 优先调度前缀匹配度高的请求
+**LPF (Longest-Prefix-First，最长前缀优先)**：
+- 当等待队列中有多个请求时，**优先调度与 RadixAttention 前缀树中已缓存的 KV Cache 匹配度最高（公共前缀最长）的请求**
 - 最大化 KV Cache 命中率
 - **SGLang 默认策略**
+
+**LPF 工作示例**：
+```
+RadixTree 中已缓存:
+  "Translate to French: Hello"      → 前缀 KV Cache 已存在
+  "Translate to French: Goodbye"    → 前缀 KV Cache 已存在
+
+等待队列中的新请求:
+  Req A: "Translate to French: World"     → match_prefix = 22 tokens ✅ 优先调度
+  Req B: "Summarize the following text"   → match_prefix = 0 tokens
+  Req C: "Translate to Spanish: Hola"     → match_prefix = 2 tokens
+
+LPF 排序后: [Req A (22), Req C (2), Req B (0)]
+```
+
+**代码中 `reverse=True` 的含义**：
+
+上方 SGLang 代码中 `self.waiting_queue.sort(..., reverse=True)` 表示**降序排列（从大到小）**。`match_prefix` 返回匹配的 token 数量，`reverse=True` 保证匹配前缀最长的请求排在队列最前面，被 `pop(0)` 优先取出调度。如果设为 `False`（默认升序），就变成了“最短前缀优先”，完全违背 LPF 策略的设计意图。
+
+| reverse 值 | 排序方向 | 效果 |
+|---|---|---|
+| `False`（默认） | 升序，匹配最短的排前面 | ✖ 优先调度缓存命中最少的请求，浪费计算 |
+| **`True`** | **降序，匹配最长的排前面** | ✔ **优先调度缓存命中最多的请求，最大化复用** |
+
+**核心收益**：前缀匹配越长，Prefill 阶段可以跳过的计算就越多（直接复用已有 KV Cache），降低首 token 延迟（TTFT）并提升整体吞吐量。
 
 **Priority-based**：
 - 支持请求优先级
@@ -661,8 +1032,10 @@ TP (2 GPUs):
 GPU 0: Y₀ = X @ W₀  (W₀: [hidden, hidden/2])
 GPU 1: Y₁ = X @ W₁  (W₁: [hidden, hidden/2])
 
-最终: Y = concat([Y₀, Y₁])
+最终: Y = concat([Y₀, Y₁])  # concat: 将各 GPU 的部分结果沿特征维度拼接还原为完整结果
 ```
+
+> **`concat` 说明**：在 TP 场景中，`concat` 将分布式计算的局部结果拼回全局结果。对应 PyTorch 的 `torch.cat()`。与 KV Cache 中的 `concat`（将零散的缓存向量拼成完整矩阵用于注意力计算）含义相同，都是将多个小张量沿某个维度合并成一个大张量。
 
 **Attention 层并行**：
 ```
@@ -702,9 +1075,9 @@ class ColumnParallelLinear(nn.Module):
         return output
 ```
 
-### 5.3 Pipeline Parallelism (PP)
+### 5.3 Pipeline Parallelism (PP，流水线并行)
 
-**核心思想**：将模型按层切分到多个 GPU
+**核心思想**：将模型**按层（layer）切分**到不同的 GPU 上，每个 GPU 只负责一部分层的计算，数据像流水线一样依次流过各个 GPU
 
 ```
 GPU 0: Layers 0-7
@@ -737,6 +1110,39 @@ GPU 3: ░░░░░░░░░░░░[F₁][F₂][F₃][F₄][F₅]
 - 点对点通信（P2P）
 - 通信量：O(hidden_size × micro_batch_size)
 - 适合：**跨节点**（以太网也可）
+
+#### TP vs PP 核心对比
+
+| 对比维度 | **TP（Tensor Parallelism）** | **PP（Pipeline Parallelism）** |
+|---|---|---|
+| **切分对象** | 切**张量/权重矩阵**（同一层按行或列拆分） | 切**模型层**（不同层分配给不同 GPU） |
+| **每个 GPU 负责** | 同一层的**部分计算** | **不同层**的完整计算 |
+| **数据流动** | 同一层内各 GPU 算完后**合并结果** | 数据依次**流过各 GPU**（流水线） |
+| **通信模式** | **All-Reduce**（每层都要同步） | **P2P 点对点**（仅相邻 GPU 传输激活值） |
+| **通信频率** | 极高（每一层都要通信） | 较低（仅层间传递） |
+| **对带宽要求** | 极高，需要 **NVLink/NVSwitch** | 较低，以太网也可接受 |
+| **适合场景** | **节点内**（同一台机器内的 GPU） | **跨节点**（多台机器之间） |
+| **GPU 利用率** | 高（各 GPU 同时计算） | 存在**气泡问题**（GPU 空闲等待） |
+
+**直观理解**：
+
+```
+TP（切张量）— 所有 GPU 同时处理同一层的不同部分：
+                     Layer i
+GPU 0: heads 0-7    ─┐
+GPU 1: heads 8-15   ─┤── All-Reduce 合并 → 完整输出
+GPU 2: heads 16-23  ─┤
+GPU 3: heads 24-31  ─┘
+
+PP（切层）— 每个 GPU 负责不同层，数据像流水线依次流过：
+GPU 0: Layers 0-7  →  GPU 1: Layers 8-15  →  GPU 2: Layers 16-23  →  GPU 3: Layers 24-31
+```
+
+**为什么通常 TP 用于节点内、PP 用于节点间？**
+- TP 每一层都需要 All-Reduce 通信，对带宽要求极高，只有节点内的 NVLink（~900 GB/s）才能满足
+- PP 只在层间传递激活值，通信量小且频率低，跨节点的以太网/InfiniBand 带宽即可胜任
+
+> 一句话总结：**TP 横着切矩阵，每层都要通信，要高带宽；PP 竖着切层，数据流水线流过，通信少但有气泡。**
 
 ### 5.4 Data Parallelism (DP)
 
@@ -773,6 +1179,81 @@ class DataParallelInference:
         
         return outputs
 ```
+
+#### 5.4.1 训练中的 DP：All-Reduce 梯度同步
+
+在训练场景下，每个 GPU 用不同数据各自计算出梯度，但模型参数更新需要使用**所有 GPU 梯度的平均值**来保持一致性。这就是 **All-Reduce 梯度同步**。
+
+**All-Reduce = Reduce-Scatter + All-Gather**：
+
+##### Ring All-Reduce 流程
+
+最常用的实现是 **Ring All-Reduce**，避免单点通信瓶颈：
+
+**第一阶段：Reduce-Scatter（散射归约）**
+
+每个 GPU 的梯度切成 N 份，沿环形拓扑传递并累加：
+
+```
+GPU 0: [g0_A] [g0_B] [g0_C] [g0_D]
+GPU 1: [g1_A] [g1_B] [g1_C] [g1_D]
+GPU 2: [g2_A] [g2_B] [g2_C] [g2_D]
+GPU 3: [g3_A] [g3_B] [g3_C] [g3_D]
+
+经过 N-1 步环形传递累加后：
+
+GPU 0: 持有完整的 [SUM_D]  ← 所有 GPU 的 D 块之和
+GPU 1: 持有完整的 [SUM_A]  ← 所有 GPU 的 A 块之和
+GPU 2: 持有完整的 [SUM_B]  ← 所有 GPU 的 B 块之和
+GPU 3: 持有完整的 [SUM_C]  ← 所有 GPU 的 C 块之和
+```
+
+> 🔴 **求和（Sum）在这里完成**——Reduce-Scatter 阶段通过环形传递对梯度块做累加。
+
+**第二阶段：All-Gather（全聚集）**
+
+再沿环形拓扑传递 N-1 步，每个 GPU 广播自己持有的完整块：
+
+```
+最终结果：
+GPU 0: [SUM_A] [SUM_B] [SUM_C] [SUM_D]  ✅ 完整梯度之和
+GPU 1: [SUM_A] [SUM_B] [SUM_C] [SUM_D]  ✅ 完整梯度之和
+GPU 2: [SUM_A] [SUM_B] [SUM_C] [SUM_D]  ✅ 完整梯度之和
+GPU 3: [SUM_A] [SUM_B] [SUM_C] [SUM_D]  ✅ 完整梯度之和
+```
+
+##### 梯度求平均在哪里完成？
+
+梯度求平均有两种常见实现方式：
+
+**方式一：先 Sum，最后本地除以 N（最常见）**
+
+```python
+# PyTorch DDP 默认方式
+all_reduce(gradients, op=SUM)       # 环形通信，求梯度之和
+gradients = gradients / world_size  # 本地除以 GPU 数量，得到平均值
+```
+
+- **Sum 求和**：在 Reduce-Scatter 阶段（**跨 GPU 通信中**）完成
+- **÷ N 求平均**：在 All-Reduce 完成后（**每个 GPU 本地**）独立完成
+
+**方式二：直接在通信中做 Mean**
+
+```python
+# NCCL 支持直接求平均
+dist.all_reduce(tensor, op=dist.ReduceOp.AVG)
+```
+
+##### Ring All-Reduce 的优势
+
+| 方案 | 通信量 | 瓶颈 |
+|---|---|---|
+| **朴素方案**（所有 GPU → 主节点 → 广播） | O(N × M) 集中在主节点 | 主节点带宽成为瓶颈 |
+| **Ring All-Reduce** | 每个 GPU 发送/接收 **2(N-1)/N × M** 数据 | **均匀分摊**到所有 GPU，无瓶颈 |
+
+> 其中 M 是梯度总大小，N 是 GPU 数量。Ring All-Reduce 的通信量与 GPU 数量 N 无关（趋近于 2M），扩展性极好。
+
+> 💡 **在 PyTorch DDP 中的具体位置**：梯度同步不是等反向传播全部结束才触发，而是采用 **Gradient Bucketing（梯度分桶）** 策略——反向传播过程中，一旦某个桶（bucket）内的梯度全部算完，就立即触发 All-Reduce，实现**通信与计算重叠（overlap）**，大幅减少等待时间。
 
 ### 5.5 混合并行
 
@@ -835,6 +1316,38 @@ DP Rank 1:
 **加速比**：
 - 理论：k 倍（如果所有候选都正确）
 - 实际：1.5-3 倍（取决于 draft model 的准确率）
+
+#### 为什么能加速 k 倍？——不是省资源，而是省时间
+
+表面看，小模型和大模型都要推理，总计算量不减反增。但关键在于：**Decode 阶段的瓶颈不是计算量，而是大模型的串行前向传播次数**。
+
+**核心洞察**：Decode 阶段是 Memory-Bound（参见 §2.3），每步只处理 1 个 token，GPU 利用率极低（<20%），大量时间花在从 HBM 读取模型权重和 KV Cache 上。因此，大模型一次前向传播验证 1 个 token 和验证 k 个 token 的耗时几乎相同（类似 Prefill 的并行计算）。
+
+**时间对比**：
+
+```
+没有推测解码（原始方式）：生成 k 个 token 需要 k 次大模型前向传播
+  [大模型]→[大模型]→[大模型]→[大模型]  串行 k 步
+
+有推测解码：生成 k 个 token 只需 1 次大模型前向传播 + k 次小模型前向传播
+  [小模型×k] + [大模型×1]              串行 ~1.x 步
+   快速          一次搞定
+```
+
+| | 大模型前向传播次数 | 小模型前向传播次数 | 总耗时（近似） |
+|---|---|---|---|
+| **原始 Decode** | k 次 | 0 | k × T_大 |
+| **推测解码** | **1 次** | k 次 | **1 × T_大 + k × T_小** |
+
+代入数字（k=4，T_大=50ms，T_小=5ms）：
+- 原始：4 × 50ms = **200ms**
+- 推测解码：1 × 50ms + 4 × 5ms = **70ms** → 加速约 **2.9 倍**
+
+**为什么大模型能"一次验证 k 个"？** 验证过程类似 Prefill——把 k 个候选 token 作为一个序列输入大模型，**并行计算**所有位置的 logits，然后逐个检查是否与 draft model 的预测一致。
+
+**理论 k 倍的条件**：当小模型足够快（T_小 ≈ 0）且所有 k 个候选都被接受时，加速比趋近 k 倍。实际中由于小模型不免费且不是所有候选都能被接受，所以实际加速比在 1.5-3 倍。
+
+> **类比**：像排队买票——原来排 k 次队（每次买 1 张），现在让助手先填好 k 张表（很快），然后你只排 1 次队，一次性验证办理。**排队时间（大模型推理延迟）才是瓶颈**，填表（小模型推理）很快。
 
 ### 6.3 Draft Model 选择
 
@@ -922,23 +1435,30 @@ class SpeculativeDecoding:
    - Prefill：计算密集型，高并行度
    - Decode：内存密集型，低并行度
    - PD 分离：提升资源利用率
+   - **前向传播**：输入→输出，计算预测值，推理只需前向传播；**后向传播**：输出→输入，计算梯度更新权重，仅训练阶段需要
+   - **计算量公式**：前向传播 FLOPs = 2 × params × tokens（每个参数对每个 token 贡献 2 次浮点操作）；训练 ≈ 6 × params × tokens
+   - 7B 模型 Decode 单步 14 GFLOPs，Prefill 2048 tokens 约 28.7 TFLOPs
 
-3. **FlashAttention**：内存高效的 Attention
-   - 分块计算，减少 HBM 访问
-   - 加速 2-4x，内存减少 10-20x
+3. **FlashAttention**：IO-Aware 的内存高效 Attention
+   - 分块计算 + 在线 Softmax + 重计算，减少 HBM 访问
+   - FA-1 加速 2-4x，FA-2 加速 3-8x，内存减少 10-20x
+   - Matmul（Tensor Core）vs 非 Matmul（CUDA Core）的效率差异是 FA-2 优化核心
 
 4. **Continuous Batching**：动态批处理
    - 动态添加/移除请求
    - GPU 利用率提升 30-50%
+   - LPF（最长前缀优先）策略：优先调度缓存匹配度最高的请求，最大化 KV Cache 复用
 
 5. **并行策略**：
-   - TP：Tensor 切分，适合单节点
-   - PP：层切分，适合跨节点
-   - DP：数据并行，适合高吞吐量
+   - TP：切张量/权重矩阵，每层 All-Reduce 通信，需高带宽（NVLink），适合**节点内**
+   - PP（Pipeline Parallelism）：按层切分，数据流水线式流过各 GPU，P2P 通信频率低，适合**跨节点**
+   - TP vs PP 核心区别：TP 横切矩阵（同一层拆给多 GPU），PP 纵切层（不同层分给不同 GPU）
+   - DP：数据并行，适合高吞吐量；训练时通过 Ring All-Reduce 梯度同步保持模型一致性
 
 6. **推测解码**：
    - 小模型生成，大模型验证
    - 加速 1.5-3x
+   - 加速原理：不是省计算量，而是将大模型的 k 次串行前向传播减少为 1 次并行验证，利用 Decode 阶段 Memory-Bound 的特性（验证 k 个 token 与验证 1 个耗时几乎相同）
 
 ---
 
