@@ -237,6 +237,120 @@ Decoder-Only（GPT/Llama）：
 输出: "很好"
 ```
 
+#### LM Head 详解：从向量到 Token 的完整过程
+
+经过 N 层 Decoder Layer 处理后，模型在**最后一个 token 位置**输出一个 hidden_size 维的向量（如 Llama-7B 为 4096 维）。LM Head 的任务就是将这个向量"翻译"成词表中某个具体的 token。
+
+**完整数据流**：
+
+```
+                    LM Head 内部工作流程
+                    ════════════════════
+
+  Decoder 输出                     LM Head 线性投影
+  ───────────                      ────────────────
+  hidden_state                     W_lm_head
+  [hidden_size]                    [hidden_size × vocab_size]
+  (如 4096 维)                     (如 4096 × 32000)
+       │                                │
+       └──────── 矩阵乘法 ──────────────┘
+                    │
+                    ▼
+              logits（原始分数）
+              [vocab_size] = [32000]
+              ┌─────────────────────────────────────────┐
+              │ "hello": 2.1, "world": 8.7, "好": 1.3,  │
+              │ "the": 5.2, "very": 3.8, ...共32000个值   │
+              └─────────────────────────────────────────┘
+                    │
+                    ▼ softmax 归一化
+              概率分布 P
+              [vocab_size] = [32000]
+              ┌─────────────────────────────────────────┐
+              │ "hello": 0.01, "world": 0.72, "好": 0.00│
+              │ "the": 0.15,   "very": 0.04, ...        │
+              │ 所有值之和 = 1.0                          │
+              └─────────────────────────────────────────┘
+                    │
+                    ▼ 采样策略选择
+              token_id = 2834
+                    │
+                    ▼ 查词表
+              输出 token: "world"
+```
+
+**Step 1：线性投影（Linear Projection）**
+
+```
+logits = hidden_state @ W_lm_head    # [4096] × [4096, 32000] → [32000]
+```
+
+- `W_lm_head` 是一个 `[hidden_size, vocab_size]` 的权重矩阵
+- 每一列对应词表中一个 token 的"模式"向量
+- 矩阵乘法的本质是**计算 hidden_state 与每个 token 模式的相似度**
+- 输出的 logits 是未归一化的原始分数，值域为 (-∞, +∞)
+
+> **权重共享（Weight Tying）**：许多模型（如 GPT-2、Llama）中，`W_lm_head` 直接复用 Embedding 层的权重矩阵的转置。这不仅节省参数，还让语义空间保持一致——"编码"和"解码"使用同一套词向量。
+
+**Step 2：Softmax 归一化**
+
+```
+P(token_i) = exp(logits_i) / Σ exp(logits_j)     对所有 j ∈ vocab
+```
+
+将 logits 转换为概率分布，所有值在 [0, 1] 之间，总和为 1。
+
+实际推理中通常先除以**温度参数 T**（Temperature）再做 softmax：
+
+```
+P(token_i) = exp(logits_i / T) / Σ exp(logits_j / T)
+```
+
+| 温度 T | 效果 | 适用场景 |
+|--------|------|----------|
+| T → 0  | 概率集中在最大值，接近确定性 | 代码生成、事实问答 |
+| T = 1  | 标准分布 | 通用对话 |
+| T > 1  | 概率更均匀，增加随机性 | 创意写作、头脑风暴 |
+
+**Step 3：采样策略（Decoding Strategy）**
+
+从概率分布中选出下一个 token，常见策略：
+
+| 策略 | 方法 | 特点 |
+|------|------|------|
+| **Greedy** | `argmax(P)` 取概率最大的 | 确定性，可能重复单调 |
+| **Top-k** | 只从概率最高的 k 个中采样 | k=50 常见，平衡多样性 |
+| **Top-p (Nucleus)** | 从累积概率达到 p 的最小集合中采样 | p=0.9 常见，动态候选集大小 |
+| **Beam Search** | 保留 beam_size 个最优序列 | 翻译等任务，计算量较大 |
+
+```
+示例（Top-p = 0.9）：
+
+排序后概率：
+  "world"  0.72  ← 累积 0.72
+  "the"    0.15  ← 累积 0.87
+  "very"   0.04  ← 累积 0.91 > 0.9，截断
+  ──────────────────
+  候选集 = {"world", "the", "very"}
+  在这3个token中按概率重新归一化后随机采样
+```
+
+**完整数值示例**（沿用前文 "Hello" → "world" 的例子）：
+
+```
+输入: "Hello"
+
+1. Embedding:  "Hello" → [0.12, 0.45, ..., 0.33]  (4096维)
+2. N层Decoder: → hidden_state = [0.384, 0.340, ..., 0.208]  (4096维)
+3. LM Head:    hidden_state @ W_lm_head → logits[32000]
+               logits = [..., 8.7, ..., 5.2, ..., 2.1, ...]
+4. Softmax:    → P = [..., 0.72, ..., 0.15, ..., 0.01, ...]
+5. Greedy:     argmax → token_id = 2834
+6. 查词表:      vocab[2834] = "world"
+
+输出: "world"
+```
+
 ### 0.4 两大核心模块详解
 
 #### ① 自注意力机制（Self-Attention）
@@ -951,20 +1065,27 @@ V heads:  [   共享 V1         ] | [   共享 V2         ]
 
 **代码示例**（vLLM）：
 ```python
+# 借鉴 OS 虚拟内存分页机制：Block ↔ 页面，free_blocks ↔ 空闲页帧列表，block_tables ↔ 页表
 class BlockSpaceManager:
     def __init__(self, block_size=16, num_blocks=1000):
-        self.block_size = block_size
-        self.free_blocks = list(range(num_blocks))
-        self.block_tables = {}  # {seq_id: [block_ids]}
+        self.block_size = block_size            # 每个物理块能存储的 token 数（类比 OS 页面大小）
+        self.free_blocks = list(range(num_blocks))  # 空闲物理块 ID 池：[0, 1, ..., 999]
+        self.block_tables = {}  # 块表（页表）：{seq_id: [block_ids]}，记录每个请求占用的物理块
     
     def allocate(self, seq_id, num_tokens):
+        # 向上取整计算所需块数：ceil(a/b) = (a + b - 1) // b
+        # 例：30 tokens → ceil(30/16) = 2 块，33 tokens → ceil(33/16) = 3 块
         num_blocks = (num_tokens + self.block_size - 1) // self.block_size
+        # 从空闲池末尾弹出所需数量的物理块（物理块在 GPU 显存中无需连续）
         blocks = [self.free_blocks.pop() for _ in range(num_blocks)]
+        # 建立 seq_id → [block_ids] 的映射，通过块表间接寻址实现逻辑连续
         self.block_tables[seq_id] = blocks
         return blocks
     
     def free(self, seq_id):
+        # 从块表中移除该序列，同时获取其占用的物理块列表
         blocks = self.block_tables.pop(seq_id)
+        # 将物理块归还到空闲池，供后续请求复用（消除外部碎片）
         self.free_blocks.extend(blocks)
 ```
 
@@ -1139,6 +1260,47 @@ FLOPs = 2 × seq_len × hidden_size × num_layers
 - FlashAttention 的重计算策略（不存储中间注意力矩阵，反向时重新前向计算）本质上是用前向传播的 FLOPs 换内存空间
 - 推测解码中的「大模型验证」本质上是一次前向传播，把 k 个候选 token 一次性并行前向传播验证，比 k 次串行前向传播快得多
 - 数据并行（DP）训练时，后向传播完成后需通过 All-Reduce 同步各 GPU 的梯度，然后统一更新参数
+
+**为什么后向传播的计算量是前向传播的 2 倍？**
+
+这个「2 倍」来自一个简单的数学事实：**后向传播中，每个线性层需要计算两组梯度，而每组梯度的计算量都与前向传播相当。**
+
+以单个线性层 `Y = X @ W` 为例（X 形状 `[m, k]`，W 形状 `[k, n]`）：
+
+```
+前向传播:  Y = X @ W                → FLOPs = 2mkn   (1份)
+
+后向传播（已知上游梯度 dL/dY）:
+  ① 对权重的梯度:  dL/dW = Xᵀ @ (dL/dY)    → FLOPs = 2mkn   (1份)  ← 用于更新参数
+  ② 对输入的梯度:  dL/dX = (dL/dY) @ Wᵀ    → FLOPs = 2mkn   (1份)  ← 传给前一层
+
+后向合计 = 2份 = 前向的 2 倍
+```
+
+为什么后向传播需要计算**两组梯度**：
+- **dL/dW（对权重的梯度）**：知道「参数应该怎么改」，用于梯度下降更新权重
+- **dL/dX（对输入的梯度）**：知道「前一层的输出应该怎么调」，用于链式法则继续向前传播
+
+用类比来理解：
+```
+前向传播 = 考试答题（做 1 遍题）
+后向传播 = 对答案 + 总结错题：
+  ├── 对答案（dL/dX）：找出每一步哪里理解错了 → 1 份计算量
+  └── 总结错题（dL/dW）：找出知识点哪里薄弱需要加强 → 1 份计算量
+  合计 = 2 × 答题工作量
+```
+
+推广到整个模型（所有层的 2 倍关系叠加）：
+
+| | 单层 | 整个模型 |
+|---|---|---|
+| 前向传播 | 2mkn | **2 × params × tokens** |
+| 后向传播 | 4mkn（2 倍） | **4 × params × tokens** |
+| 训练一步（前向 + 后向） | 6mkn | **6 × params × tokens** |
+
+> **补充说明**：
+> - 激活函数（ReLU/SiLU）、LayerNorm、Softmax 等非线性操作的梯度计算量较小，主要计算量集中在矩阵乘法，因此整体近似 2 倍
+> - **推理只需前向传播**（不需要 dL/dW 和 dL/dX），计算量仅为训练的 1/3
 
 ### 2.3.2 计算量公式：2 × params × tokens
 
@@ -1536,14 +1698,52 @@ O = diag(1/l) @ O   # ← 最后才统一除以 l，只做一次！
 
 ##### 2. 优化 Warp 级别并行（交换循环顺序）
 
+**Warp 是什么？**
+
+Warp 是 NVIDIA GPU 中**最基本的线程调度单位**，由 **32 个线程（thread）** 组成。GPU 的线程层级结构如下：
+
+```
+GPU
+ └── SM（Streaming Multiprocessor，流多处理器）  ← 一个 GPU 有几十到上百个 SM
+      └── Block（线程块）                       ← 一个 SM 可以运行多个 Block
+           └── Warp（线程束）= 32 个线程        ← 最小调度单位
+                └── Thread（线程）
+```
+
+Warp 的关键特性：
+- **锁步执行（Lock-step）**：同一个 Warp 内的 32 个线程**同时执行相同的指令**，只是处理的数据不同（SIMT 模型）
+- **最小调度单位**：GPU 不是按单个线程调度的，而是**以 Warp 为单位**分配给 SM 执行
+- **Warp 内通信极快**：同一个 Warp 内的线程可以通过 shuffle 指令直接交换数据，不需要经过共享内存
+- **Warp 间通信较慢**：不同 Warp 之间需要通过**共享内存 + 同步屏障**来通信
+
+**FA-1 vs FA-2 的 Warp 并行策略：**
+
 ```
 FA-1: for Kⱼ → for Qᵢ  (需要在不同 warp 间同步 Oᵢ)
 FA-2: for Qᵢ → for Kⱼ  (每个 warp 独立完成一个 Qᵢ 的全部计算)
 ```
 
-- FA-1：外层循环遍历 K/V 块，内层遍历 Q 块
+```
+┌─ FA-1: 多个 Warp 合作处理一个 Q（需要同步）──────────────┐
+│                                                          │
+│  Warp0 ──→ Q₁×K₁  ─┐                                    │
+│  Warp1 ──→ Q₁×K₂  ─┼──→ 合并到 O₁ (需要共享内存同步!)    │
+│  Warp2 ──→ Q₁×K₃  ─┤                                    │
+│  Warp3 ──→ Q₁×K₄  ─┘                                    │
+└──────────────────────────────────────────────────────────┘
+
+┌─ FA-2: 每个 Warp 独立处理一个 Q（无需同步）──────────────┐
+│                                                          │
+│  Warp0 ──→ Q₁×K₁ → Q₁×K₂ → Q₁×K₃ → Q₁×K₄ → O₁  (独立) │
+│  Warp1 ──→ Q₂×K₁ → Q₂×K₂ → Q₂×K₃ → Q₂×K₄ → O₂  (独立) │
+│  Warp2 ──→ Q₃×K₁ → Q₃×K₂ → Q₃×K₃ → Q₃×K₄ → O₃  (独立) │
+│  Warp3 ──→ Q₄×K₁ → Q₄×K₂ → Q₄×K₃ → Q₄×K₄ → O₄  (独立) │
+└──────────────────────────────────────────────────────────┘
+```
+
+- FA-1：外层循环遍历 K/V 块，内层遍历 Q 块，多个 Warp 处理同一个 Q 块的不同 K 部分，最后需要 Warp 间同步合并结果
 - FA-2：**交换了循环顺序**，外层遍历 Q 块，内层遍历 K/V 块
-- 好处：每个 warp 负责一个 Q 块的完整计算，减少 warp 间的通信和同步
+- 好处：每个 Warp 独立负责一个 Q 块的完整计算，**消除了 Warp 间的同步开销**
 
 ##### 3. 减少共享内存读写
 
@@ -2194,6 +2394,7 @@ class SpeculativeDecoding:
    - Decode：内存密集型，低并行度
    - PD 分离：提升资源利用率
    - **前向传播**：输入→输出，计算预测值，推理只需前向传播；**后向传播**：输出→输入，计算梯度更新权重，仅训练阶段需要
+   - **后向传播 = 2 × 前向传播**：每个线性层后向需计算 dL/dW（更新参数）+ dL/dX（传给前一层），各 1 份前向计算量，合计 2 倍；训练一步 = 前向(2) + 后向(4) = **6 × params × tokens**
    - **计算量公式**：前向传播 FLOPs = 2 × params × tokens（每个参数对每个 token 贡献 2 次浮点操作）；训练 ≈ 6 × params × tokens
    - 7B 模型 Decode 单步 14 GFLOPs，Prefill 2048 tokens 约 28.7 TFLOPs
 
