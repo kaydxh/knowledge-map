@@ -1,21 +1,75 @@
 # 大模型推理技术分享 - Part 2: GPU与算子相关
 
 > **受众**: AI平台开发工程师
-> **目标**: 理解大模型推理中的GPU架构和算子优化
+> **目标**: 理解大模型推理中的GPU架构和算子优化，让你在面对推理性能问题时能找到硬件层面的根因
 
 ---
 
 ## 目录
 
+- [为什么你需要了解这些？](#为什么你需要了解这些)
+- [概念关系图](#概念关系图)
 1. [GPU 架构基础](#1-gpu-架构基础)
 2. [内存层次结构](#2-内存层次结构)
 3. [CUDA 编程模型](#3-cuda-编程模型)
 4. [关键算子优化](#4-关键算子优化)
 5. [性能分析与调优](#5-性能分析与调优)
+- [🎯 速查卡片](#-速查卡片)
+
+---
+
+## 为什么你需要了解这些？
+
+在 Part1 中，我们学了推理的核心概念（KV Cache、Prefill/Decode、FlashAttention 等）。但当你真正去优化推理性能时，会遇到这些更底层的问题：
+
+| 你遇到的问题 | 你需要理解的概念 | 才知道… |
+|-------------|----------------|--------|
+| nsys 报告里全是 kernel 名，看不懂 | **SM 架构**（§1） | GPU 内部到底是怎么组织和执行的 |
+| 模型用了 FP16 但 Tensor Core 利用率为 0 | **Tensor Core**（§1.3） | 怎样的矩阵运算才能触发 Tensor Core |
+| Decode 阶段 GPU 利用率 <1%，算力浪费 | **内存层次 & Roofline**（§2） | 性能瓶颈不在算力，而在显存带宽 |
+| 自定义 kernel 性能很差 | **CUDA 编程模型**（§3） | Shared Memory、合并访问等基础概念 |
+| 想理解 FlashAttention 为什么快 | **关键算子优化**（§4） | MatMul/Softmax/LayerNorm 的 GPU 优化原理 |
+| 不知道从哪下手做性能优化 | **Profiling 工具**（§5） | 用 Nsight 等工具定位真正的瓶颈 |
+
+本文就是帮你补齐这些 GPU 和算子层面的"底层直觉"。
+
+---
+
+## 概念关系图
+
+下图展示了本文所有核心概念之间的依赖关系。**向下的箭头表示"理解下面需要先理解上面"**：
+
+```
+                    ┌───────────────────────┐
+                    │  §1 GPU 架构基础       │ ← 硬件基础
+                    │  SM / Tensor Core      │
+                    └───────────┬───────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              ↓                 ↓                 ↓
+     ┌────────────────┐ ┌───────────────┐ ┌──────────────────┐
+     │ §2 内存层次    │ │ §3 CUDA       │ │ §4 关键算子优化   │
+     │ HBM/SRAM/     │ │    编程模型    │ │ MatMul/Softmax   │
+     │ Roofline      │ │ Thread/Block  │ │ LayerNorm/FA     │
+     └───────┬────────┘ └───────┬───────┘ └────────┬─────────┘
+             │                  │                   │
+             └──────────────────┼───────────────────┘
+                                ↓
+                    ┌───────────────────────┐
+                    │  §5 性能分析与调优     │ ← 综合应用
+                    │  Profiling / 优化策略  │
+                    └───────────────────────┘
+```
+
+💡 **推荐阅读顺序**：§1 → §2 → §3 → §4 → §5（按章节顺序即可）
+
+如果你赶时间，只看 **§1（GPU 架构基础）+ §2（内存层次）** 就能理解 80% 的推理性能问题的根因。
 
 ---
 
 ## 1. GPU 架构基础
+
+> 🟢 **一句话版本**：GPU 就是"人海战术"的芯片——CPU 像一个博士（什么都会但只有几个人），GPU 像几千个小学生（只会简单加减法但人多力量大）。大模型推理本质就是海量矩阵运算，正好适合 GPU 的"人海战术"。
 
 ### 1.1 GPU vs CPU
 
@@ -89,9 +143,16 @@ SM (每个)
 - **Occupancy**: SM 上活跃 warp 的比例
   > Occupancy 反映了 SM 上"有多少个 warp 在排队等执行"，足够高时能有效隐藏内存延迟，但过度追求 100% 可能适得其反。
 
+> 💼 **实战关联**：
+> - 当你用 `nvidia-smi` 看到 A100 和 H100 时，核心区别是：H100 的 Tensor Core 支持 FP8（A100 不支持），且 HBM 带宽从 2 TB/s 提升到 3.35 TB/s——这直接决定了 Decode 速度上限
+> - `ncu` 报告里的 `sm__throughput.avg.pct_of_peak_sustained_elapsed` 就是 SM 利用率——如果它很低但 Memory 利用率很高，说明是 Memory-bound
+> - 理解 SM 架构后你就知道：为什么 `--tensor-parallel-size=2` 时性能不一定是单卡的 2 倍——因为 TP 需要跨 SM 通信（AllReduce），有额外开销
+
 ---
 
 ## 2. 内存层次结构
+
+> 🟢 **一句话版本**：GPU 内部有从快到慢、从小到大的多级存储（寄存器 → SRAM → L2 → HBM），就像你身边的便签纸（小但秒取）→ 抽屉里的笔记本（稍大但要开抽屉）→ 楼下仓库的档案柜（很大但要走一趟）。推理优化的核心就是让数据尽量待在"便签纸"（SRAM）上，少去"楼下仓库"（HBM）。
 
 ### 2.1 内存层次
 
@@ -346,9 +407,17 @@ Shared Memory 被硬件分为 **32 个 Bank**（存储体），映射规则为 `
 
 > **一句话总结**：合并访问解决"怎样高效地从 HBM 搬数据到芯片上"的问题，Bank 冲突解决"数据到了片上 Shared Memory 后，怎样让 32 个线程高效并行使用"的问题。两者分别卡住了 GPU 内存访问的**外部带宽**和**内部并行度**，都是算子优化的核心关注点。
 
+> 💼 **实战关联**：
+> - 当你看到 nsys 报告中某个 kernel 的 Memory Throughput 接近峰值（如 A100 的 2 TB/s）但 SM Utilization 很低时，这就是典型的 Memory-bound
+> - vLLM 的 `--dtype float16` 参数直接决定了模型权重的大小，从而决定 Decode 阶段每步需要从 HBM 读取多少数据
+> - 量化（INT8/INT4）的核心价值不是省显存（虽然也省），而是**减少 HBM 读取量**——模型体积缩小一半，Decode 速度理论上提升一倍
+> - 理解内存层次后你就明白了：FlashAttention 之所以快，是因为它把 Attention 计算从 HBM（慢）搬到了 SRAM（快）
+
 ---
 
 ## 3. CUDA 编程模型
+
+> 🟢 **一句话版本**：CUDA 是 NVIDIA 提供的 GPU 编程框架。你写一个函数（Kernel），GPU 会用几千个线程同时执行它。线程按 Thread → Warp（32个一组）→ Block → Grid 的层次组织，就像公司里的员工 → 小组 → 部门 → 公司。理解这个层次，才能写出高效的 GPU 代码。
 
 ### 3.1 线程层次
 
@@ -476,9 +545,16 @@ __global__ void matmul_wmma(half* A, half* B, float* C, int M, int N, int K) {
 }
 ```
 
+> 💼 **实战关联**：
+> - 当你用 `ncu` 分析某个 kernel 发现 Occupancy 很低时，通常是因为 Register 或 Shared Memory 用得太多，限制了每个 SM 能跑的 Block 数
+> - 理解 Shared Memory 后你就能看懂 FlashAttention 的源码了——它本质就是把 Q/K/V 分块加载到 Shared Memory 中计算
+> - Tensor Core 需要特定数据类型（FP16/BF16/FP8）和对齐要求（维度是 8 的倍数），如果你的模型 hidden_size 不满足这些条件，Tensor Core 不会被触发
+
 ---
 
 ## 4. 关键算子优化
+
+> 🟢 **一句话版本**：大模型推理 90% 以上的时间花在 MatMul（矩阵乘法）、Softmax、LayerNorm 和 Attention 这几个核心算子上。优化它们的共同思路就两个字：**少搬**（减少显存读写）和**多算**（用 Tensor Core 加速计算）。
 
 ### 4.1 MatMul（矩阵乘法）
 
@@ -960,9 +1036,17 @@ FlashAttention:
 - 加速比: 3.3x
 ```
 
+> 💼 **实战关联**：
+> - 你在 nsys 报告里看到的 `flash_fwd_kernel` 就是 FlashAttention 的 Prefill kernel，`flash_bwd_kernel` 是反向传播用的
+> - Online Softmax 是 FlashAttention 的核心技术之一——理解了它，就理解了为什么 FlashAttention 能不存储完整的 N² 注意力矩阵
+> - Welford's Algorithm 是所有主流推理框架中 LayerNorm kernel 的标准实现，你在 CUTLASS/Triton 源码里都能看到
+> - 算子融合（Fusion）是最容易获得"免费"加速的优化——vLLM/SGLang 已经默认启用了大部分常见融合模式
+
 ---
 
 ## 5. 性能分析与调优
+
+> 🟢 **一句话版本**：不 Profile 就优化等于蒙眼开车。用 Nsight Systems 看全局时间线（找到最慢的 kernel），用 Nsight Compute 深入分析单个 kernel（看它是卡在算力还是带宽），用 PyTorch Profiler 从 Python 层面定位问题。三层工具配合使用，才能精准定位瓶颈。
 
 ### 5.1 性能指标
 
@@ -1102,6 +1186,66 @@ prof.export_chrome_trace("trace.json")
 - [ ] CUDA Graph（减少 launch overhead）
 - [ ] TensorRT（静态图优化）
 
+> 💼 **实战关联**：
+> - 实际优化工作流：先用 `nsys profile` 采集全局 timeline → 找到最耗时的 kernel → 用 `ncu` 深入分析该 kernel 的瓶颈 → 对症下药
+> - vLLM 中可以通过 `--enforce-eager` 禁用 CUDA Graph 来方便调试和 profiling
+> - 当 nsys 显示大量小 kernel 密集排列时，优先考虑 CUDA Graph 或算子融合
+> - 当某个 kernel 的 Memory Throughput 接近硬件峰值但 Compute 利用率很低时，说明是 Memory-bound，考虑量化或减少数据搬运
+
+---
+
+## 🎯 速查卡片
+
+> 以下是全文核心知识的一页浓缩，可以打印贴工位方便随时查阅。
+
+### GPU 硬件速查
+
+| 概念 | 一句话记忆 | 关键数字 |
+|------|-----------|----------|
+| **SM** | GPU 的基本计算单元，包含 CUDA Core + Tensor Core | A100: 108个, H100: 132个 |
+| **Tensor Core** | 专用矩阵乘法硬件，比 CUDA Core 快 16x | 需要 FP16/BF16/FP8 + 维度对齐 |
+| **Warp** | 32 个线程的执行单元 | GPU 调度的最小粒度 |
+| **HBM** | GPU 显存，3D 堆叠高带宽 | A100: 2 TB/s, H100: 3.35 TB/s |
+| **SRAM** | 片上高速缓存 | 192 KB/SM，比 HBM 快 10x |
+| **Registers** | 最快的存储 | 1 cycle 延迟，~20 TB/s |
+
+### 内存层次速查
+
+| 层级 | 延迟 | 容量 | 带宽 | 类比 |
+|------|------|------|------|------|
+| Registers | 1 cycle | ~KB/SM | ~20 TB/s | 手边便签纸 |
+| SRAM/L1 | ~20 cycles | 192 KB/SM | ~19 TB/s | 桌上笔记本 |
+| L2 Cache | ~200 cycles | 40 MB | ~7 TB/s | 抽屉里的文件 |
+| HBM | ~300-400 cycles | 40-80 GB | 1.6-3.35 TB/s | 楼下仓库 |
+
+### 关键算子速查
+
+| 算子 | 一句话记忆 | 优化核心 | 关键技术 |
+|------|-----------|---------|----------|
+| **MatMul** | 大模型最耗时的运算 | 用 Tensor Core + 分块 | cuBLAS, CUTLASS |
+| **Softmax** | 概率归一化，3-pass 太慢 | 减少 pass 数 | Online Softmax（1-pass） |
+| **LayerNorm** | 归一化层，调用极频繁 | 减少 HBM 读写 | Welford's Algorithm |
+| **FlashAttention** | Attention 的终极优化 | 分块 + 不存 N² 矩阵 | 在线 Softmax + SRAM 分块 |
+| **算子融合** | 多个 kernel 合一个 | 中间结果留在片上 | Linear+Bias+Activation 融合 |
+
+### Profiling 工具速查
+
+| 工具 | 定位 | 看什么 | 命令 |
+|------|------|--------|------|
+| **nsys** | 全局 timeline | 哪个 kernel 最慢、GPU 空闲在哪 | `nsys profile -o out python xx.py` |
+| **ncu** | 单 kernel 深入 | SM 利用率、带宽、Occupancy | `ncu --set full -o out python xx.py` |
+| **PyTorch Profiler** | Python 层面 | 算子耗时、内存分配 | `with torch.profiler.profile(...)` |
+
+### 性能诊断速查
+
+| 现象 | 可能原因 | 对应概念 | 解决方向 |
+|------|---------|---------|----------|
+| GPU 利用率 <20% | Memory-bound（Decode 阶段） | §2 HBM 带宽 | 量化、GQA/MQA |
+| 大量小 kernel | Kernel Launch Overhead | §5.3 | CUDA Graph、算子融合 |
+| Tensor Core 利用率 0% | 数据类型/对齐不满足 | §1.3 Tensor Core | FP16/BF16 + 维度对齐 |
+| Warp Occupancy 低 | Register/SMEM 用量过大 | §1.3 SM 架构 | 调整 Block Size |
+| Shared Memory 性能差 | Bank Conflict | §2.4 | Padding (`[N][N+1]`) |
+
 ---
 
 ## 总结
@@ -1138,3 +1282,5 @@ prof.export_chrome_trace("trace.json")
 ---
 
 **下一部分**：推理框架对比与 vLLM 深入解析
+
+> 📖 **相关阅读**：如果你还没看 Part1，建议先阅读 [大模型推理技术分享-Part1-基础概念](./大模型推理技术分享-Part1-基础概念.md)，了解 KV Cache、Prefill/Decode、FlashAttention 等核心推理概念。
