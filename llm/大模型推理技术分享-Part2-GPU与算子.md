@@ -495,6 +495,7 @@ FLOPs = 2 × batch_size × seq_len × hidden_size²
 **公式详解**：
 
 各参数含义：
+
 | 符号 | 含义 | 说明 |
 |---|---|---|
 | **batch_size** | 批大小 | 一次送入多少条样本 |
@@ -520,6 +521,7 @@ Y[i][j] = X[i][0]×W[0][j] + X[i][1]×W[1][j] + ... + X[i][hidden_size-1]×W[hid
 ```
 
 实际例子（以 **LLaMA-2 7B** 的一个 Linear 层为例，hidden_size = 4096）：
+
 | 场景 | batch_size | seq_len | FLOPs | 结果 |
 |---|---|---|---|---|
 | Decode 阶段（逐 token） | 1 | 1 | 2×1×1×4096² | **33.5 MFLOPs** |
