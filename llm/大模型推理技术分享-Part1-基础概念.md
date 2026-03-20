@@ -1,12 +1,14 @@
 # 大模型推理技术分享 - Part 1: 关键基础概念
 
 > **受众**: AI平台开发工程师
-> **目标**: 深入理解大模型推理的核心技术原理
+> **目标**: 深入理解大模型推理的核心技术原理，让你在面对推理服务的性能问题时，能快速定位瓶颈所在
 
 ---
 
 ## 目录
 
+- [为什么你需要了解这些？](#为什么你需要了解这些)
+- [概念关系图](#概念关系图)
 0. [前置知识：Transformer 架构与原理](#0-前置知识transformer-架构与原理)
 1. [KV Cache：推理加速的核心](#1-kv-cache推理加速的核心)
 2. [Prefill vs Decode：两阶段推理](#2-prefill-vs-decode两阶段推理)
@@ -14,6 +16,56 @@
 4. [Continuous Batching：动态批处理](#4-continuous-batching动态批处理)
 5. [并行策略：TP、PP、DP](#5-并行策略tpppdp)
 6. [推测解码：加速生成](#6-推测解码加速生成)
+- [🎯 速查卡片](#-速查卡片)
+
+---
+
+## 为什么你需要了解这些？
+
+假设你的老板让你部署一个 7B 的大模型做线上推理服务，你会遇到这些问题：
+
+| 你遇到的问题 | 你需要理解的概念 | 才知道… |
+|-------------|----------------|--------|
+| 用户说 "太慢了"，每个 token 生成要几十毫秒 | **Prefill vs Decode**（§2） | 慢在哪个阶段，是计算瓶颈还是内存瓶颈 |
+| GPU 显存爆了，并发上不去 | **KV Cache**（§1） | 显存被谁吃了，怎么估算和优化 |
+| 加了 GPU 卡没效果，吞吐没提升 | **并行策略 TP/PP/DP**（§5） | 怎么正确地把模型分到多张卡上 |
+| 用户一多就卡，排队严重 | **Continuous Batching**（§4） | 怎么动态调度请求让 GPU 不闲着 |
+| 长文本 prompt 处理特别慢 | **FlashAttention**（§3） | Attention 的显存瓶颈在哪，怎么优化 |
+| Decode 阶段 GPU 利用率不到 20% | **推测解码**（§6） | 怎么用小模型加速大模型的生成 |
+
+本文就是帮你建立这些"直觉"的。每个概念我们都会从**一句话通俗理解**开始，逐步深入到原理和公式。
+
+---
+
+## 概念关系图
+
+下图展示了本文所有核心概念之间的依赖关系。**向下的箭头表示"理解下面需要先理解上面"**：
+
+```
+                        ┌──────────────────┐
+                        │  §0 Transformer  │ ← 一切的基础
+                        │  （架构与原理）    │
+                        └────────┬─────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              ↓                  ↓                  ↓
+     ┌────────────────┐ ┌───────────────┐ ┌─────────────────┐
+     │ §1 KV Cache    │ │ §2 Prefill vs │ │ §3 Flash-       │
+     │（缓存省计算）    │ │    Decode     │ │    Attention    │
+     │                │ │（两阶段推理）   │ │（省显存读写）    │
+     └───────┬────────┘ └───────┬───────┘ └────────┬────────┘
+             │                  │                   │
+             ↓                  ↓                   ↓
+     ┌────────────────┐ ┌───────────────┐ ┌─────────────────┐
+     │ §4 Continuous  │ │ §5 并行策略    │ │ §6 推测解码      │
+     │    Batching    │ │   TP/PP/DP    │ │（小模型加速）    │
+     │（动态批处理）    │ │（多卡扩展）    │ │                 │
+     └────────────────┘ └───────────────┘ └─────────────────┘
+```
+
+💡 **推荐阅读顺序**：§0 → §1 → §2 → §3 → §4 → §5 → §6（按章节顺序即可）
+
+如果你赶时间，只看 **§0（Transformer 基础）+ §1（KV Cache）+ §2（Prefill vs Decode）** 就能理解 80% 的推理优化逻辑。
 
 ---
 
@@ -745,6 +797,10 @@ Transformer 的"记忆"：
 
 ---
 
+## 1. KV Cache：推理加速的核心
+
+> 🟢 **一句话版本**：推理时把算过的中间结果（Key 和 Value）存起来，下次直接用，不再重算。就像考试时把已经验算过的中间步骤写在草稿纸上，后面用到时直接抄，不用再算一遍。
+
 ### 1.1 为什么需要 KV Cache？
 
 **问题背景**：
@@ -1180,9 +1236,16 @@ class RadixCache:
 | 内存碎片 | 可能存在 | 更少 |
 | 适用场景 | 通用推理 | Few-shot、对话、Agent |
 
+> 💼 **实战关联**：
+> - 当你在 vLLM 配置里看到 `gpu_memory_utilization=0.9` 时，背后就是在设置 KV Cache 占用 GPU 显存的比例
+> - 当你看到 `max_model_len=4096` 参数时，它直接决定了每个请求的 KV Cache 大小，乞就决定了并发数上限
+> - Llama-2-7B 每个请求 KV Cache 约 1GB，A100-80GB 理论并发上限约 80 个（还要减去模型权重占用）
+
 ---
 
 ## 2. Prefill vs Decode：两阶段推理
+
+> 🟢 **一句话版本**：大模型推理分两步——Prefill（一次性“消化”全部输入）和 Decode（一个一个“吐出”输出）。Prefill 像吃自助餐（一次性摆满桌），Decode 像点菜（一道一道上）。前者耗算力，后者耗显存带宽。
 
 ### 2.1 两阶段概述
 
@@ -1431,9 +1494,17 @@ Batch:
 2. **优先级调度**：Decode 优先，Prefill 填充空闲
 3. **分离集群**：PD Disaggregation
 
+> 💼 **实战关联**：
+> - 当你观察到推理服务的 **TTFT（首 Token 时间）** 很高时，瓶颈在 Prefill 阶段（计算密集型）
+> - 当你观察到 **TPS（每秒 Token 数）** 很低时，瓶颈在 Decode 阶段（内存密集型）
+> - vLLM 的 `--max-model-len` 参数直接影响 Prefill 的计算量，Decode 的 KV Cache 读取量
+> - `2 × params × tokens` 公式可以快速估算你的 GPU 能否在目标延迟内完成推理
+
 ---
 
 ## 3. FlashAttention：内存高效的注意力机制
+
+> 🟢 **一句话版本**：标准 Attention 需要在显存中存放一个巨大的 seq_len² 矩阵，FlashAttention 把它分块处理，在高速缓存（SRAM）内完成计算，用完就丢，不写回显存。就像看书记笔记——不把整本书复印一遍，而是翻一页记一页，用完就翻下一页。
 
 > 论文：*FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*（Dao et al., 2022）
 
@@ -1828,9 +1899,17 @@ class RadixAttentionWithFlash:
 
 **一句话总结**：FlashAttention 的本质是一种 **IO-Aware（IO 感知）** 的算法优化——通过分块计算 + 在线 Softmax，将 attention 计算从 Memory-Bound 转变为 Compute-Bound，大幅减少 HBM 读写，同时保持数学上的精确性。
 
+> 💼 **实战关联**：
+> - vLLM 和 SGLang 默认已集成 FlashAttention，你无需手动开启
+> - 当你遇到长文本 prompt 处理慢时，检查是否在用 FlashAttention（`--disable-flash-attn` 禁用后对比）
+> - seq_len 从 2K 增到 16K，FlashAttention 的加速比从 3-5x 提升到 7-15x，越长越明显
+> - 如果用 nsys 分析推理性能，你会在 Kernel Summary 中看到 `flash_fwd_kernel` 或 `flash_bwd_kernel`
+
 ---
 
 ## 4. Continuous Batching：动态批处理
+
+> 🟢 **一句话版本**：传统批处理像等最慢的人吃完才能上菜，Continuous Batching 像自助餐——谁吃完谁走，新客人随时加入，GPU 永远不闲着。
 
 ### 4.1 传统静态批处理的问题
 
@@ -1960,9 +2039,17 @@ LPF 排序后: [Req A (22), Req C (2), Req B (0)]
 - 支持请求优先级
 - 适合多租户场景
 
+> 💼 **实战关联**：
+> - vLLM 的 `--max-num-seqs` 参数就是在调 Continuous Batching 的并发数
+> - SGLang 默认用 LPF（最长前缀优先）策略，对 Few-shot 和多轮对话场景尤其有效
+> - 当你观察到 GPU 利用率忽高忽低时，很可能是 Continuous Batching 没生效（或最大 batch size 设得太小）
+> - Chunked Prefill 可以通过 vLLM 的 `--enable-chunked-prefill` 开启，缓解 Prefill 大请求对 Decode 延迟的影响
+
 ---
 
 ## 5. 并行策略：TP、PP、DP
+
+> 🟢 **一句话版本**：模型太大单卡放不下，需要多卡协作。TP（张量并行）= 同一层切给多卡同时算，PP（流水线并行）= 不同层分给不同卡依次算，DP（数据并行）= 模型复制多份，各处理不同数据。就像工厂流水线：TP 是多人合作拧同一个零件，PP 是每人负责一道工序，DP 是开多条一模一样的生产线。
 
 ### 5.1 为什么需要并行？
 
@@ -2234,9 +2321,17 @@ DP Rank 1:
 - 多节点（4 nodes × 8 GPUs）：TP = 8, PP = 4
 - 超大模型（1T+ params）：TP = 8, PP = 16, DP = 4
 
+> 💼 **实战关联**：
+> - vLLM 的 `--tensor-parallel-size` 参数就是 TP 大小，`--pipeline-parallel-size` 就是 PP 大小
+> - 单节点 8 卡推理时，设 `--tensor-parallel-size=8` 即可，TP 会自动利用 NVLink 高速通信
+> - 多节点推理时，建议节点内 TP + 节点间 PP，因为 TP 需要高带宽（NVLink），PP 对带宽要求低
+> - 如果只想提升吐量不用多卡，用 DP（多开几个完全相同的推理实例）最简单
+
 ---
 
 ## 6. 推测解码：加速生成
+
+> 🟢 **一句话版本**：Decode 阶段 GPU 利用率很低（<20%），推测解码的思路是让小模型先“猜” k 个 token，再让大模型一次性“验证”。就像你让助手先填好表格，你只需要签字确认——签字（大模型验证）比填表（逐个生成）快得多。
 
 ### 6.1 为什么需要推测解码？
 
@@ -2374,6 +2469,45 @@ class SpeculativeDecoding:
 **Medusa (Llama-2-70B)**：
 - 加速比：1.5x
 - Draft 准确率：40-50%
+
+> 💼 **实战关联**：
+> - vLLM 支持推测解码，通过 `--speculative-model` 指定 draft 模型，`--num-speculative-tokens` 指定 k 值
+> - k 值太大会增加 draft 模型的开销，k 太小又达不到加速效果，通常 k=4-5 是个好的起点
+> - 推测解码的加速效果很大程度上取决于 draft 模型的准确率——如果每次都被拒绝，反而比不用还慢
+> - 对于代码生成等“确定性强”的任务，draft 准确率比创意写作更高，加速效果更好
+
+---
+
+## 🎯 速查卡片
+
+> 以下是全文核心知识的一页浓缩，可以打印贴工位方便随时查阅。
+
+| 概念 | 一句话记忆 | 解决什么问题 | 关键数字 |
+|------|-----------|------------|----------|
+| **Transformer** | 基于注意力机制，每个词同时看到所有其他词 | 取代 RNN 的串行递推 | Decoder-Only 是当前主流 |
+| **KV Cache** | 算过的 K/V 存起来不重算 | 推理加速 O(n²)→O(n) | 7B 模型单请求 ~1GB |
+| **Prefill** | 一次性处理所有输入 token | 理解 TTFT 延迟 | 计算密集型，GPU 利用率 >80% |
+| **Decode** | 逐个生成输出 token | 理解 TPS 吐量 | 内存密集型，GPU 利用率 <20% |
+| **FlashAttention** | 分块算 Attention，不存完整 N² 矩阵 | 减少显存读写，支持更长上下文 | FA-2 加速 3-8x，显存省 10-20x |
+| **Continuous Batching** | 动态凑批，不等最长的 | 提高 GPU 利用率 | 吐量提升 2-3x |
+| **TP** | 同一层切到多卡 | 单卡放不下 | 需 NVLink，适合节点内 |
+| **PP** | 不同层放不同卡 | 超大模型 | 低带宽即可，适合跨节点 |
+| **DP** | 相同模型多副本 | 提高吐量 | 推理时无通信开销 |
+| **推测解码** | 小模型猜 + 大模型验 | Decode 加速 | 加速 1.5-3x |
+
+### 🔧 常用 vLLM/SGLang 参数速查
+
+| 参数 | 对应概念 | 含义 |
+|--------|-----------|------|
+| `--gpu-memory-utilization` | KV Cache | 显存中用于 KV Cache 的比例 |
+| `--max-model-len` | KV Cache / Prefill | 最大序列长度，直接影响显存占用和并发数 |
+| `--max-num-seqs` | Continuous Batching | 最大并发请求数 |
+| `--tensor-parallel-size` | TP | 张量并行度 |
+| `--pipeline-parallel-size` | PP | 流水线并行度 |
+| `--enable-chunked-prefill` | Prefill/Decode | 将长 Prefill 分块，减少对 Decode 的影响 |
+| `--speculative-model` | 推测解码 | 指定 draft 模型 |
+| `--num-speculative-tokens` | 推测解码 | 每次推测的 token 数（k 值） |
+| `--enforce-eager` | CUDA Graph | 禁用 CUDA Graph，用于调试 |
 
 ---
 
