@@ -17,6 +17,23 @@
 5. [并行策略：TP、PP、DP](#5-并行策略tpppdp)
 6. [推测解码：加速生成](#6-推测解码加速生成)
 - [🎯 速查卡片](#-速查卡片)
+- [⚠️ 常见误区与易混点](#️-常见误区与易混点)
+- [📚 延伸阅读](#-延伸阅读)
+
+---
+
+## 阅读前你需要知道什么
+
+本文假设你具备以下基础知识。如果对某项不熟悉，建议先快速了解后再阅读：
+
+| 前置知识 | 需要了解到什么程度 | 不熟悉怎么办 |
+|---------|-------------------|-------------|
+| **线性代数基础** | 知道矩阵乘法、向量点积是什么 | 搜索 "3Blue1Brown 线性代数" 看前 4 集 |
+| **GPU 基础概念** | 知道 GPU 有显存（如 A100 80GB）、知道 GPU 擅长并行计算 | 直接阅读，§0 会补充必要背景 |
+| **深度学习基本概念** | 知道什么是神经网络、前向传播、训练和推理的区别 | 搜索 "深度学习 30 分钟入门" |
+| **Python 基础** | 能看懂 `for` 循环和函数调用（文中有少量伪代码） | 不影响理解核心概念，可跳过代码块 |
+
+> 💡 如果上述知识你都不熟悉，也不用担心——§0（Transformer 前置知识）会从最基础的概念讲起，跟着读即可。
 
 ---
 
@@ -795,6 +812,11 @@ Transformer 的"记忆"：
 
 > **关键洞察**：Transformer 的 O(n²) 复杂度看似比 RNN 的 O(n) 更高，但由于**完全可并行化**，在 GPU 上的实际训练速度远快于 RNN。这使得 Transformer 能够利用大规模数据和算力训练出 GPT、Llama 等百亿/千亿参数模型——这是 RNN 架构根本无法做到的。这也是深度学习从 RNN 时代全面转向 Transformer 时代的根本原因。
 
+> ✅ **看完这一章，你至少要记住**：
+> 1. 当前主流大模型（GPT、Llama）都是 **Decoder-Only** 架构，核心是自注意力 + FFN 的 N 层堆叠
+> 2. Self-Attention 让每个 token 能“看到”所有历史 token，FFN 负责对每个位置做独立的非线性变换
+> 3. Transformer 凭借全并行训练 + O(1) 长距离依赖 + KV Cache 无损记忆，全面取代了 RNN/LSTM
+
 ---
 
 ## 1. KV Cache：推理加速的核心
@@ -1241,6 +1263,11 @@ class RadixCache:
 > - 当你看到 `max_model_len=4096` 参数时，它直接决定了每个请求的 KV Cache 大小，乞就决定了并发数上限
 > - Llama-2-7B 每个请求 KV Cache 约 1GB，A100-80GB 理论并发上限约 80 个（还要减去模型权重占用）
 
+> ✅ **看完这一章，你至少要记住**：
+> 1. KV Cache 是把每层算过的 K、V 存起来不重算，将 Decode 复杂度从 O(n²) 降到 O(n)
+> 2. KV Cache 是推理显存的最大消耗者之一，7B 模型单请求约 **1GB**
+> 3. GQA（分组查询注意力）是当前主流的 KV Cache 节省方案，Llama-2-70B 用 GQA 节省 75% 显存
+
 ---
 
 ## 2. Prefill vs Decode：两阶段推理
@@ -1499,6 +1526,11 @@ Batch:
 > - 当你观察到 **TPS（每秒 Token 数）** 很低时，瓶颈在 Decode 阶段（内存密集型）
 > - vLLM 的 `--max-model-len` 参数直接影响 Prefill 的计算量，Decode 的 KV Cache 读取量
 > - `2 × params × tokens` 公式可以快速估算你的 GPU 能否在目标延迟内完成推理
+
+> ✅ **看完这一章，你至少要记住**：
+> 1. Prefill 是**计算密集型**（一次算所有 token），Decode 是**内存密集型**（一次只算 1 个 token）
+> 2. TTFT 高 → 瓶颈在 Prefill；TPS 低 → 瓶颈在 Decode，两者优化方向不同
+> 3. 前向传播 FLOPs ≈ **2 × 参数量 × token 数**，这个公式能快速估算计算量
 
 ---
 
@@ -1905,6 +1937,11 @@ class RadixAttentionWithFlash:
 > - seq_len 从 2K 增到 16K，FlashAttention 的加速比从 3-5x 提升到 7-15x，越长越明显
 > - 如果用 nsys 分析推理性能，你会在 Kernel Summary 中看到 `flash_fwd_kernel` 或 `flash_bwd_kernel`
 
+> ✅ **看完这一章，你至少要记住**：
+> 1. FlashAttention 的核心是**分块计算 + 在线 Softmax**，避免在 HBM 中存储完整的 N² 注意力矩阵
+> 2. 它不是近似计算，结果与标准 Attention **数学上完全等价**
+> 3. 序列越长加速越明显，seq_len 16K 时加速 7-15x，显存节省 10-20x
+
 ---
 
 ## 4. Continuous Batching：动态批处理
@@ -2044,6 +2081,11 @@ LPF 排序后: [Req A (22), Req C (2), Req B (0)]
 > - SGLang 默认用 LPF（最长前缀优先）策略，对 Few-shot 和多轮对话场景尤其有效
 > - 当你观察到 GPU 利用率忽高忽低时，很可能是 Continuous Batching 没生效（或最大 batch size 设得太小）
 > - Chunked Prefill 可以通过 vLLM 的 `--enable-chunked-prefill` 开启，缓解 Prefill 大请求对 Decode 延迟的影响
+
+> ✅ **看完这一章，你至少要记住**：
+> 1. Continuous Batching = 动态凑批，请求完成即退出、新请求即时加入，GPU 永不空闲
+> 2. 相比静态批处理，吞吐提升 **2-3x**
+> 3. Chunked Prefill 将长 Prefill 分块，防止大请求堵塞其他请求的 Decode
 
 ---
 
@@ -2327,6 +2369,11 @@ DP Rank 1:
 > - 多节点推理时，建议节点内 TP + 节点间 PP，因为 TP 需要高带宽（NVLink），PP 对带宽要求低
 > - 如果只想提升吐量不用多卡，用 DP（多开几个完全相同的推理实例）最简单
 
+> ✅ **看完这一章，你至少要记住**：
+> 1. TP（张量并行）= 横切矩阵，同一层拆给多 GPU，需要 NVLink 高带宽，适合**节点内**
+> 2. PP（流水线并行）= 纵切层，不同层分给不同 GPU，适合**跨节点**
+> 3. 推理场景只想提吞吐，最简单的方式是 DP（数据并行）——多开几个相同实例
+
 ---
 
 ## 6. 推测解码：加速生成
@@ -2476,6 +2523,11 @@ class SpeculativeDecoding:
 > - 推测解码的加速效果很大程度上取决于 draft 模型的准确率——如果每次都被拒绝，反而比不用还慢
 > - 对于代码生成等“确定性强”的任务，draft 准确率比创意写作更高，加速效果更好
 
+> ✅ **看完这一章，你至少要记住**：
+> 1. 推测解码 = 小模型先“猜” k 个 token，大模型一次性“验”，加速 1.5-3x
+> 2. 加速原理不是省计算量，而是利用 Decode 阶段 Memory-Bound 的特性（验证 k 个和 1 个耗时几乎相同）
+> 3. draft 模型准确率是关键——太低反而拖慢，代码生成等确定性强的任务效果最好
+
 ---
 
 ## 🎯 速查卡片
@@ -2508,6 +2560,44 @@ class SpeculativeDecoding:
 | `--speculative-model` | 推测解码 | 指定 draft 模型 |
 | `--num-speculative-tokens` | 推测解码 | 每次推测的 token 数（k 值） |
 | `--enforce-eager` | CUDA Graph | 禁用 CUDA Graph，用于调试 |
+
+---
+
+## ⚠️ 常见误区与易混点
+
+| # | 误区 | 正确理解 |
+|---|------|----------|
+| 1 | "KV Cache 是一种近似/压缩技术" | ❌ KV Cache 是**精确缓存**，结果与不缓存完全一致，只是避免重复计算 |
+| 2 | "FlashAttention 是近似 Attention" | ❌ FlashAttention 的计算结果与标准 Attention **数学上完全等价**，只是改变了计算顺序和内存访问模式 |
+| 3 | "Prefill 慢就加显存，Decode 慢就加算力" | ❌ 恰好反过来。Prefill 是**计算密集型**（需要更强算力），Decode 是**内存密集型**（需要更大显存带宽） |
+| 4 | "TP 数越大越好" | ❌ TP 每层需要 All-Reduce 通信，GPU 数越多通信开销越大。通常 TP ≤ 8（单节点内），超出用 PP |
+| 5 | "推测解码总是更快" | ❌ 如果 draft 模型准确率太低，每次都被拒绝，反而比不用还慢（白白增加了 draft 前向传播的开销） |
+| 6 | "Continuous Batching = 大 batch size" | ❌ Continuous Batching 的核心是**动态调度**（请求随到随走），不是简单地增大 batch 大小 |
+| 7 | "GQA 比 MHA 质量差很多" | ❌ 实验表明 GQA（如 Llama-2-70B 用 8 组 KV heads）在质量上与 MHA 非常接近，但 KV Cache 节省 75% |
+| 8 | "模型参数量 = 显存占用" | ❌ 推理时显存 = 模型权重 + **KV Cache**（随并发数和序列长度线性增长） + 激活值，KV Cache 往往是显存瓶颈 |
+
+---
+
+## 📚 延伸阅读
+
+### 关键论文
+
+| 概念 | 论文 | 说明 |
+|------|------|------|
+| Transformer | *Attention Is All You Need* (Vaswani et al., 2017) | 一切的起点 |
+| FlashAttention | *FlashAttention: Fast and Memory-Efficient Exact Attention* (Dao et al., 2022) | IO-Aware 的内存高效 Attention |
+| FlashAttention-2 | *FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning* (Dao, 2023) | 进一步优化并行和工作分配 |
+| GQA | *GQA: Training Generalized Multi-Query Transformer Models* (Ainslie et al., 2023) | KV Cache 节省的主流方案 |
+| PagedAttention | *Efficient Memory Management for Large Language Model Serving with PagedAttention* (Kwon et al., 2023) | vLLM 的核心创新 |
+| 推测解码 | *Fast Inference from Transformers via Speculative Decoding* (Leviathan et al., 2023) | 小模型猜 + 大模型验 |
+
+### 推荐阅读顺序（按角色）
+
+| 你的角色 | 推荐阅读路径 | 目标 |
+|---------|-------------|------|
+| **推理服务使用者**（只需要部署和调参） | §0 概览 → §1.1-1.2 → §2.1-2.2 → 速查卡片 | 知道关键参数含义，能基本调优 |
+| **推理服务调优者**（需要深入优化性能） | 全文按顺序阅读 → Part 2（GPU 与算子） | 理解每个优化背后的原理 |
+| **推理框架开发者**（需要实现/修改框架） | 全文精读 + 所有论文 → Part 2 → Part 3（推理框架） | 掌握实现细节和设计权衡 |
 
 ---
 
